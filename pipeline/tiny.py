@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Fine-tune a tiny encoder classifier in seconds, per question; the "train on the fly" arm.
 
-  .venv-gliner/bin/python pipeline/tiny.py banking77 [--per-class N] [--model M] [--epochs E]
-  .venv-gliner/bin/python pipeline/tiny.py customer <id> [--model M] [--epochs E]
+  .venv/bin/python pipeline/tiny.py banking77 [--per-class N] [--model M] [--epochs E]
+  .venv/bin/python pipeline/tiny.py customer <id> [--model M] [--epochs E]
 
 banking77: train on ~/.djev/bench/banking77/train.csv (optionally N rows per class), score the 3,080-message test set.
 customer: train on the customer's training split (djcore.split), score their held-out rows, one classifier per
 question: the same rows pipeline/ab.py scored for djev and GLiNER.
 
 Default model jhu-clsp/ettin-encoder-17m (MIT). Runs on Apple MPS, CUDA or CPU. Prints one verdict line with accuracy,
-train seconds and rows; appends it to ~/.djev/tiny/log.jsonl. Needs torch + transformers (the .venv-gliner env).
+train seconds and rows; appends it to ~/.djev/tiny/log.jsonl. Needs torch + transformers (the .venv env).
 """
 import csv
 import json

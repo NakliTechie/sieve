@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A/B: djev (/v1/systemone) vs GLiNER2.5-Decide on the same rows, questions and options, plus an option-order test.
 
-  .venv-gliner/bin/python pipeline/ab.py run [--arms djev,gliner] [--orders orig,rev,shuf] [--limit N]
+  .venv/bin/python pipeline/ab.py run [--arms djev,gliner] [--orders orig,rev,shuf] [--limit N]
   python3 pipeline/ab.py report [run-dir]          # aggregates -> stdout (markdown); raw rows stay in ~/.djev/ab
 
 Suite: the held-out rows of every customer in $DJP_HOME and examples (djcore.split), plus the single-choice questions of
