@@ -52,6 +52,8 @@ winner is served exactly as it was scored.
 - On stand-in customers, the gate chose tiny for shop: 70.8 % → 90.3 %, 72 held-out rows, p = 0.007.
 - For helpdesk type, it chose djev with rules and calibration: 64.1 % → 75.6 %, p = 0.02.
 - Four other questions moved within noise.
+- On 5 real labelled sets (MASSIVE en/hi, CLINC150, banking77, civil comments), a model trained on this Mac beats every
+  stock model from about 50 labels per option. With all labels it wins by 18–19 points.
 - Details: [results/](results/).
 
 ## Adding labels

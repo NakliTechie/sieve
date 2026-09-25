@@ -29,8 +29,10 @@ LOG = P.DATA / "tiny" / "log.jsonl"
 MODEL = "jhu-clsp/ettin-encoder-17m"
 
 
-def train(rows, labels, model_id=MODEL, epochs=10, lr=1e-4, max_len=256, bs=32, seed=0, device=None):
-    """rows: [(text, label)]. -> (model, tokenizer, train_seconds). Seeded; the rows list is not modified."""
+def train(rows, labels, model_id=MODEL, epochs=10, lr=1e-4, max_len=256, bs=32, seed=0, device=None, fixed_pad=False):
+    """rows: [(text, label)]. -> (model, tokenizer, train_seconds). Seeded; the rows list is not modified.
+    fixed_pad pads every batch to max_len: one tensor shape, so MPS compiles one graph instead of one per batch
+    shape (mmBERT-small otherwise grew past 15 GB on a 24 GB Mac)."""
     dev = device or DEV
     torch.manual_seed(seed)
     rng = random.Random(seed)
@@ -48,7 +50,8 @@ def train(rows, labels, model_id=MODEL, epochs=10, lr=1e-4, max_len=256, bs=32, 
         rng.shuffle(rows)
         for i in range(0, len(rows), bs):
             b = rows[i:i + bs]
-            enc = tok([t for t, _ in b], truncation=True, max_length=max_len, padding=True, return_tensors="pt").to(dev)
+            enc = tok([t for t, _ in b], truncation=True, max_length=max_len,
+                      padding="max_length" if fixed_pad else True, return_tensors="pt").to(dev)
             out = model(**enc, labels=torch.tensor([idx[l] for _, l in b], device=dev))
             out.loss.backward()
             opt.step()
@@ -60,13 +63,14 @@ def train(rows, labels, model_id=MODEL, epochs=10, lr=1e-4, max_len=256, bs=32, 
     return model, tok, time.time() - t0
 
 
-def proba(model, tok, texts, max_len=256, bs=128):
+def proba(model, tok, texts, max_len=256, bs=128, fixed_pad=False):
     """-> [{label: p}] for texts, softmax over the model's labels."""
     labels = [model.config.id2label[i] for i in range(model.config.num_labels)]
     out = []
     with torch.no_grad():
         for i in range(0, len(texts), bs):
-            enc = tok(texts[i:i + bs], truncation=True, max_length=max_len, padding=True, return_tensors="pt").to(model.device)
+            enc = tok(texts[i:i + bs], truncation=True, max_length=max_len,
+                      padding="max_length" if fixed_pad else True, return_tensors="pt").to(model.device)
             for row in torch.softmax(model(**enc).logits.float(), -1).tolist():
                 out.append(dict(zip(labels, row)))
     return out

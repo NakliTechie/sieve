@@ -34,6 +34,21 @@ LOCAL = "gliner,gliner-multi,gliner+cal,gliner-multi+cal,tiny,mmbert"
 STOCK = ("gliner", "gliner-multi", "djev", "djev@3")
 
 
+def free():
+    """Return a trained model's memory before the next stage: without it, MPS keeps every stage's weights and optimiser
+    state, and mmBERT-small (256k-token vocabulary) grew one run to 27 GB on a 24 GB Mac."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
 def load(name):
     d = P.DATA / "bench" / name
     read = lambda f: [(r["text"], r["label"]) for r in csv.DictReader(open(d / f, encoding="utf-8"))]
@@ -117,11 +132,13 @@ def run(name, arms, stages, cal_max):
                 steps_per_epoch = max(1, -(-len(rows) // 32))
                 epochs = min(30, max(5, -(-300 // steps_per_epoch)))
                 lr = 1e-4 if arm == "tiny" else 5e-5
-                model, tok, secs = T.train(rows, labels, MODELS[arm], epochs, lr, maxlen)
-                acc, ll = scores(T.proba(model, tok, texts, maxlen), test)
+                fixed = arm == "mmbert"
+                model, tok, secs = T.train(rows, labels, MODELS[arm], epochs, lr, maxlen, fixed_pad=fixed)
+                acc, ll = scores(T.proba(model, tok, texts, maxlen, 64 if fixed else 128, fixed_pad=fixed), test)
                 record({"arm": arm, "stage": st, "rows": len(rows), "acc": acc, "ll": ll, "seconds": round(secs, 1),
                         "epochs": epochs})
-                del model
+                del model, tok
+                free()
             else:
                 raise SystemExit(f"verdict=SETUP unknown arm '{arm}'; arms: {LOCAL},djev,djev@3,djev+cal")
     print(f"verdict=DONE bench={name} next: python3 pipeline/curve.py report {name}")
