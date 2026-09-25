@@ -1,0 +1,40 @@
+{"state": "I can't log in since the 2FA change this morning.", "answers": {"team": "account", "urgency": "medium"}}
+{"state": "Our whole team is locked out after SSO was switched on. Payroll runs in two hours.", "answers": {"team": "account", "urgency": "high"}}
+{"state": "Password reset email never arrives.", "answers": {"team": "account", "urgency": "medium"}}
+{"state": "How do I add a second admin to our workspace?", "answers": {"team": "account", "urgency": "low"}}
+{"state": "One of our users shows as disabled but she still works here.", "answers": {"team": "account", "urgency": "medium"}}
+{"state": "SSO login loops back to the sign-in page for all 40 of our staff.", "answers": {"team": "account", "urgency": "high"}}
+{"state": "Can I change the email address on my login?", "answers": {"team": "account", "urgency": "low"}}
+{"state": "The authenticator app was on my old phone and now I can't get in.", "answers": {"team": "account", "urgency": "medium"}}
+{"state": "We were charged twice for September.", "answers": {"team": "billing", "urgency": "medium"}}
+{"state": "Please send a copy of last month's invoice with our VAT number on it.", "answers": {"team": "billing", "urgency": "low"}}
+{"state": "Your system is charging every customer of ours on every refresh right now.", "answers": {"team": "billing", "urgency": "high"}}
+{"state": "I'd like a refund for the unused months after we cancelled.", "answers": {"team": "billing", "urgency": "medium"}}
+{"state": "Why did our bill go up this month?", "answers": {"team": "billing", "urgency": "low"}}
+{"state": "The card on file expired, how do I update it?", "answers": {"team": "billing", "urgency": "low"}}
+{"state": "Sales tax was added to an invoice for a tax-exempt nonprofit.", "answers": {"team": "billing", "urgency": "medium"}}
+{"state": "Our finance close is today and the invoice total is wrong.", "answers": {"team": "billing", "urgency": "high"}}
+{"state": "The API returns 500 on every POST to /orders since 9am. Nobody can check out.", "answers": {"team": "technical", "urgency": "high"}}
+{"state": "The dashboard takes 30 seconds to load for me.", "answers": {"team": "technical", "urgency": "medium"}}
+{"state": "The CSV export drops the last column.", "answers": {"team": "technical", "urgency": "medium"}}
+{"state": "Is there a rate limit on the search endpoint?", "answers": {"team": "technical", "urgency": "low"}}
+{"state": "The mobile app crashes when I open a report.", "answers": {"team": "technical", "urgency": "medium"}}
+{"state": "Webhooks stopped firing for every customer an hour ago.", "answers": {"team": "technical", "urgency": "high"}}
+{"state": "Does the SDK support Python 3.13?", "answers": {"team": "technical", "urgency": "low"}}
+{"state": "Charts show yesterday's numbers even after a refresh.", "answers": {"team": "technical", "urgency": "medium"}}
+{"state": "We want a quote for 200 more seats.", "answers": {"team": "sales", "urgency": "low"}}
+{"state": "What does the Enterprise plan include over Business?", "answers": {"team": "sales", "urgency": "low"}}
+{"state": "Can someone give our CTO a demo on Thursday?", "answers": {"team": "sales", "urgency": "low"}}
+{"state": "We need to upgrade today before our board meeting at 5pm.", "answers": {"team": "sales", "urgency": "high"}}
+{"state": "Is there a discount for nonprofits?", "answers": {"team": "sales", "urgency": "low"}}
+{"state": "We'd like to move from monthly to annual and add 10 seats.", "answers": {"team": "sales", "urgency": "medium"}}
+{"state": "My login works on web but the app says my account is locked.", "answers": {"team": "account", "urgency": "medium"}}
+{"state": "New hires can't accept their invites; the link says expired.", "answers": {"team": "account", "urgency": "medium"}}
+{"state": "Refund was promised last week and still hasn't arrived.", "answers": {"team": "billing", "urgency": "medium"}}
+{"state": "The API docs link in the email is broken.", "answers": {"team": "technical", "urgency": "low"}}
+{"state": "All users in our EU region get 'session expired' right after logging in.", "answers": {"team": "account", "urgency": "high"}}
+{"state": "Can we get a price for the on-prem version?", "answers": {"team": "sales", "urgency": "low"}}
+{"state": "Search results are empty for any query with an accent.", "answers": {"team": "technical", "urgency": "medium"}}
+{"state": "We were billed for 50 seats but only have 30 users.", "answers": {"team": "billing", "urgency": "medium"}}
+{"state": "Reset my password please.", "answers": {"team": "account", "urgency": "low"}}
+{"state": "The import job has been stuck at 99% for two days.", "answers": {"team": "technical", "urgency": "medium"}}

@@ -1,0 +1,10 @@
+{
+  "id": "acme-support",
+  "description": "Sample person: Acme's support lead. Illustrative data written for this repo, not a real customer.",
+  "questions": {
+    "team": {"type": "choice", "instructions": "Which team should own this ticket?", "criteria": ["billing", "technical", "account", "sales"]},
+    "urgency": {"type": "choice", "instructions": "How urgent is this ticket?", "criteria": ["low", "medium", "high"]}
+  },
+  "context": "You are routing tickets for Acme's support desk. Acme's rules: anything about logging in, passwords, 2FA, SSO, locked or disabled users goes to account, not technical. Invoices, refunds, charges and tax go to billing. API errors, crashes, slowness and bugs go to technical. Pricing, upgrades, quotes, demos and new seats go to sales. Urgency is high only when many users are blocked, money is moving wrongly right now, or a deadline is today; questions and requests are low; everything else is medium.",
+  "few_shot": 6
+}
