@@ -1,13 +1,14 @@
 """Per-customer release: find it, turn a state into a /v1/systemone request, calibrate the answer.
 
-Shared by the release pipeline (djp.py) and the serving route (demo/serve.py), so what is evaluated is what is served.
-Stdlib only.
+Shared by the release pipeline (djp.py), the backends (backends.py) and the server (serve.py). Stdlib only.
 
 A customer lives in $DJP_HOME/<id>/ (default data/customers in this repo, gitignored so customer data never reaches git);
 the repo's pipeline/examples/<id>/ holds made-up samples and is searched second.
   customer.json   id, questions (systemone format), context (their rules, in words), few_shot (count)
   data.jsonl      labelled rows: {"state": "...", "answers": {"<question>": "<option>", ...}}
-  releases/<version>/release.json   written by `djp.py release`; CURRENT names the live version
+  releases/<version>/release.json   written by `djp.py release` (+ tiny/<question>/ weights); CURRENT names the live
+                                    version; releases/log.jsonl has one line per release attempt
+  cache/<arm>.jsonl                 djev and gliner reads, reused across releases (backends.py)
 """
 import hashlib
 import json
@@ -16,7 +17,6 @@ import os
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 DATA = Path(os.environ.get("SIEVE_DATA", Path(__file__).resolve().parent.parent / "data"))  # gitignored
@@ -94,27 +94,6 @@ def calibrate(probs, bias):
     return {k: math.exp(v - m) / z for k, v in logits.items()}
 
 
-def answer(base_url, release, state):
-    """Serve one call for a released customer: each question on its planned prompt (at most two calls, in parallel),
-    then its calibration."""
-    groups = {}
-    for q, spec in release["plan"].items():
-        groups.setdefault(spec["use_profile"], {})[q] = release["questions"][q]
-    with ThreadPoolExecutor(len(groups)) as ex:
-        raws = list(ex.map(lambda g: ask(base_url, g[1], render_state(release["profile"] if g[0] else None, state)),
-                           groups.items()))
-    out, timing = {}, []
-    for raw in raws:
-        timing.append(raw.get("diagnostics", {}).get("timing", {}).get("total_ms"))
-        for q, a in raw.get("answers", {}).items():
-            p = calibrate(a.get("probabilities", {}), release["plan"][q]["calibration"])
-            best = max(p, key=p.get)
-            out[q] = {"choice": best, "probabilities": {k: round(v, 6) for k, v in p.items()}, "confidence": round(p[best], 6)}
-    return {"model": raws[0].get("model"), "customer": release["customer"], "release": release["version"],
-            "answers": out, "diagnostics": {"timing": {"total_ms": max(t for t in timing if t is not None) if any(timing) else None},
-                                            "calls": len(raws)}}
-
-
 def current_release(cid):
     d = customer_dir(cid)
     if d is None:
@@ -130,3 +109,12 @@ def write_atomic(path, text):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text)
     os.replace(tmp, path)
+
+
+def data_sha(cid):
+    """Content hash of the customer's labelled rows and questions: a release built from the same inputs is the same."""
+    d = customer_dir(cid)
+    h = hashlib.sha1((d / "customer.json").read_bytes())
+    if (d / "data.jsonl").exists():
+        h.update((d / "data.jsonl").read_bytes())
+    return h.hexdigest()[:16]

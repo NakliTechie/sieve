@@ -17,7 +17,6 @@ import os
 import random
 import sys
 import time
-from pathlib import Path
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -27,40 +26,69 @@ import djcore as P  # noqa: E402
 
 DEV = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 LOG = P.DATA / "tiny" / "log.jsonl"
+MODEL = "jhu-clsp/ettin-encoder-17m"
 
 
-def train_eval(train, test, labels, model_id, epochs, lr, max_len, bs=32, seed=0):
-    """train/test: [(text, label)]. -> (accuracy, train_seconds, predictions)."""
+def train(rows, labels, model_id=MODEL, epochs=10, lr=1e-4, max_len=256, bs=32, seed=0, device=None):
+    """rows: [(text, label)]. -> (model, tokenizer, train_seconds). Seeded; the rows list is not modified."""
+    dev = device or DEV
     torch.manual_seed(seed)
-    random.seed(seed)
+    rng = random.Random(seed)
+    rows = list(rows)
     idx = {l: i for i, l in enumerate(labels)}
     tok = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForSequenceClassification.from_pretrained(
-        model_id, num_labels=len(labels), id2label=dict(enumerate(labels)), label2id=idx).to(DEV)
+        model_id, num_labels=len(labels), id2label=dict(enumerate(labels)), label2id=idx).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-    steps = epochs * -(-len(train) // bs)
+    steps = epochs * -(-len(rows) // bs)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / max(1, steps // 10)) * max(0.0, 1 - s / steps))
-    enc = lambda texts: tok(texts, truncation=True, max_length=max_len, padding=True, return_tensors="pt").to(DEV)
     t0 = time.time()
     model.train()
     for _ in range(epochs):
-        random.shuffle(train)
-        for i in range(0, len(train), bs):
-            b = train[i:i + bs]
-            out = model(**enc([t for t, _ in b]), labels=torch.tensor([idx[l] for _, l in b], device=DEV))
+        rng.shuffle(rows)
+        for i in range(0, len(rows), bs):
+            b = rows[i:i + bs]
+            enc = tok([t for t, _ in b], truncation=True, max_length=max_len, padding=True, return_tensors="pt").to(dev)
+            out = model(**enc, labels=torch.tensor([idx[l] for _, l in b], device=dev))
             out.loss.backward()
             opt.step()
             sched.step()
             opt.zero_grad()
-    if DEV == "mps":
+    if dev == "mps":
         torch.mps.synchronize()
-    secs = time.time() - t0
     model.eval()
-    preds = []
+    return model, tok, time.time() - t0
+
+
+def proba(model, tok, texts, max_len=256, bs=128):
+    """-> [{label: p}] for texts, softmax over the model's labels."""
+    labels = [model.config.id2label[i] for i in range(model.config.num_labels)]
+    out = []
     with torch.no_grad():
-        for i in range(0, len(test), 128):
-            logits = model(**enc([t for t, _ in test[i:i + 128]])).logits
-            preds += [labels[j] for j in logits.argmax(-1).tolist()]
+        for i in range(0, len(texts), bs):
+            enc = tok(texts[i:i + bs], truncation=True, max_length=max_len, padding=True, return_tensors="pt").to(model.device)
+            for row in torch.softmax(model(**enc).logits.float(), -1).tolist():
+                out.append(dict(zip(labels, row)))
+    return out
+
+
+def load(path, device=None):
+    """A model saved by save() -> (model, tokenizer), in eval mode on device (default: this machine's DEV)."""
+    tok = AutoTokenizer.from_pretrained(path)
+    model = AutoModelForSequenceClassification.from_pretrained(path).to(device or DEV)
+    model.eval()
+    return model, tok
+
+
+def save(model, tok, path):
+    model.save_pretrained(path)
+    tok.save_pretrained(path)
+
+
+def train_eval(train_rows, test, labels, model_id, epochs, lr, max_len):
+    """-> (accuracy, train_seconds, predictions) on test [(text, label)]."""
+    model, tok, secs = train(train_rows, labels, model_id, epochs, lr, max_len)
+    preds = [max(p, key=p.get) for p in proba(model, tok, [t for t, _ in test], max_len)]
     acc = sum(p == l for p, (_, l) in zip(preds, test)) / len(test)
     return acc, secs, preds
 
@@ -83,7 +111,7 @@ def cmd_banking77(opt):
         for t, l in train:
             by.setdefault(l, []).append((t, l))
         train = [x for l in labels for x in rng.sample(by[l], min(n, len(by[l])))]
-    model = opt.get("--model", "jhu-clsp/ettin-encoder-17m")
+    model = opt.get("--model", MODEL)
     acc, secs, _ = train_eval(train, test, labels, model, int(opt.get("--epochs", 5)), float(opt.get("--lr", 1e-4)), 64)
     log({"task": "banking77", "model": model, "device": DEV, "train_rows": len(train), "per_class": n or "all",
          "test_rows": len(test), "accuracy": round(acc, 4), "train_s": round(secs, 1)})
@@ -92,7 +120,7 @@ def cmd_banking77(opt):
 def cmd_customer(cid, opt):
     customer, rows = P.load_customer(cid)
     train, hold = P.split(rows)
-    model = opt.get("--model", "jhu-clsp/ettin-encoder-17m")
+    model = opt.get("--model", MODEL)
     total_s, hits, n = 0.0, 0, 0
     for q, spec in customer["questions"].items():
         labels = list(spec["criteria"])

@@ -1,40 +1,52 @@
 #!/usr/bin/env python3
-"""djp: onboard a customer, then build, gate and release their own djev deployment.
+"""djp: onboard a customer, then build, gate and release their own classifier, per question on djev, GLiNER or tiny.
 
-  python3 pipeline/djp.py status                               # one line per customer: live release, holdout vs base
+  python3 pipeline/djp.py status [--json]                      # the whole picture: one line per customer
   python3 pipeline/djp.py init <customer>                      # create $DJP_HOME/<customer>/customer.json to edit
   python3 pipeline/djp.py import <customer> <file.csv|.jsonl> --state <col> --label <col>[,<col>...]
-                                                               # their data, their column names -> data.jsonl
-  python3 pipeline/djp.py check <customer>                     # validate data + questions; no GPU calls
-  python3 pipeline/djp.py release <customer>                   # eval base -> candidates -> per-question gate -> release
-  python3 pipeline/djp.py eval <customer> [base|profile|calibrated]   # holdout metrics for one variant
+                                                               # their data, their column names -> data.jsonl (replaces)
+  python3 pipeline/djp.py check <customer>                     # validate data + questions; no model calls
+  .venv/bin/python pipeline/djp.py eval <customer> [--arms djev,gliner,tiny]
+                                                               # every candidate on the holdout; writes no release
+  .venv/bin/python pipeline/djp.py release <customer> [--arms djev,gliner,tiny] [--force]
+                                                               # candidates -> per-question gate -> release -> CURRENT
+  .venv/bin/python pipeline/djp.py label <customer> <file.csv|.jsonl> [--state state] [--label <cols>] [--arms ...]
+                                                               # append new labelled rows, retrain, gate, release
 
-Customer data lives in $DJP_HOME (default data/customers, gitignored). Layer 1 (this file): a release is the
-customer's rules + examples (profile) + per-option calibration, served on the shared model at
-/c/<customer>/v1/systemone. Layer 2 (TRAINING.md) swaps the profile for trained weights behind the same gate.
+Arms (backends.py): djev (zero-shot on the GPU service; + calibration, + the customer's rules and examples),
+gliner (GLiNER2.5-Decide, zero-shot, local; + calibration), tiny (Ettin-17M fine-tuned on the training rows, local;
+only for questions with >= 20 labelled rows per option). The bar is plain djev (or plain gliner when djev is not in
+--arms). Per question, a candidate replaces the bar only if its holdout accuracy >= the bar's and its log-loss is
+lower; among those the lowest log-loss wins. The winning candidate is what gets served (serve.py): tiny weights are
+saved in the release. `release` is skipped (UNCHANGED) when the live release was built from the same data and arms.
+
+Customer data lives in $DJP_HOME (default data/customers, gitignored). Layer 2 (TRAINING.md) would add trained djev
+weights as another candidate behind the same gate.
 
 Env: DJP_HOME, DJEV_URL (default http://localhost:8081, the `gcloud run services proxy`), DJEV_WORKERS (default 8).
-Exit: 0 ok · 2 setup (customer missing, service unreachable) · 7 gate refused (nothing released) · 8 data invalid.
+Exit: 0 ok (RELEASED, UNCHANGED, VALID, ...) · 2 setup (customer missing, service unreachable, wrong python)
+      · 7 gate refused (nothing released; CURRENT unchanged) · 8 data invalid (nothing written).
 """
 import csv
 import json
 import math
 import os
+import shutil
 import sys
 import time
 import urllib.error
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import backends as B  # noqa: E402
 import djcore as P  # noqa: E402
 
 URL = os.environ.get("DJEV_URL", "http://localhost:8081")
 WORKERS = int(os.environ.get("DJEV_WORKERS", "8"))
 IMAGE = "ghcr.io/taeold/djev-run@sha256:a352b97ab4ccf9c0d5caabbb7df16e0b40a801426cd8582c0e3fe81b2da16ac1"
-MODEL = "nvidia/diffusiongemma-26B-A4B-it-NVFP4@ec4ff3df205028f4e81c954c2227f9312b3ec2ea"
 MIN_HOLDOUT = 50  # held-out rows per question before a release's numbers mean much
 VERDICTS = {2: "SETUP", 7: "GATE_REFUSED", 8: "DATA_INVALID"}
+COMMANDS = ("status", "init", "import", "check", "label", "release", "eval", "rollback")  # tools.json covers each
 TODO = "TODO: say in one sentence what this question decides"
 
 
@@ -143,16 +155,50 @@ def cmd_check(cid):
           f"warnings={len(warnings)} next: python3 pipeline/djp.py release {cid}")
 
 
+# ---------- label: new rows in, retrain, gate ----------
+
+def cmd_label(cid, path, state_col, label_cols, arms, force):
+    """Append labelled rows (dedup by state), then re-release. Safe to re-run with the same file: rows already present
+    are skipped, and the release is skipped when the live one was built from the same data."""
+    customer, rows = load_valid(cid)
+    qs = customer["questions"]
+    label_cols = label_cols or list(qs)
+    have = {r["state"]: r["answers"] for r in rows}
+    new, dup, errors = [], 0, []
+    for i, r in enumerate(read_table(path), 1):
+        answers = r.get("answers") if isinstance(r.get("answers"), dict) else {c: r.get(c) for c in label_cols}
+        state = str(r.get(state_col) or "").strip()
+        answers = {q: str(a).strip() for q, a in answers.items() if q in qs and a not in (None, "")}
+        if not state:
+            errors.append(f"row {i}: no '{state_col}'")
+            continue
+        missing = [q for q in qs if q not in answers]
+        bad = [f"{q}='{a}'" for q, a in answers.items() if a not in qs[q]["criteria"]]
+        if missing or bad:
+            errors.append(f"row {i}: " + ", ".join([f"no answer for '{q}'" for q in missing] +
+                                                   [f"{b} is not an option" for b in bad]))
+            continue
+        if state in have:
+            if have[state] == answers:
+                dup += 1
+            else:
+                errors.append(f"row {i}: state already labelled differently ({have[state]}); change it in data.jsonl")
+            continue
+        have[state] = answers
+        new.append({"state": state, "answers": answers})
+    if errors:
+        for e in errors[:20]:
+            print(f"error: {e}")
+        die(8, f"customer={cid} {len(errors)} bad rows in {path}; nothing appended. Options: {json.dumps({q: s['criteria'] for q, s in qs.items()})}")
+    d = P.customer_dir(cid)
+    if new:  # one atomic rewrite: the file holds the old rows or old + new, never a torn append
+        P.write_atomic(d / "data.jsonl", "".join(json.dumps(r) + "\n" for r in rows + new))
+    print(f"verdict=LABELLED customer={cid} added={len(new)} already_present={dup} rows={len(rows) + len(new)}")
+    cur = P.current_release(cid)
+    cmd_release(cid, arms or (cur or {}).get("arms") or list(B.ARMS), force)
+
+
 # ---------- release ----------
-
-def predict(questions, profile, rows):
-    """-> list of {question: {option: p}} for rows, raw model probabilities (no calibration)."""
-    def one(row):
-        a = P.ask(URL, questions, P.render_state(profile, row["state"]))["answers"]
-        return {q: a[q]["probabilities"] for q in questions}
-    with ThreadPoolExecutor(WORKERS) as ex:
-        return list(ex.map(one, rows))
-
 
 def metrics(questions, preds, rows, calibration=None):
     """Per question and overall: accuracy, log-loss (nats), expected calibration error (10 bins)."""
@@ -200,90 +246,245 @@ def load_valid(cid):
     return customer, rows
 
 
-def cmd_eval(cid, variant="calibrated"):
-    customer, rows = load_valid(cid)
-    train, hold = P.split(rows)
-    profile, fit_rows = build_profile(customer, train)
-    qs = customer["questions"]
-    cal = None
-    if variant == "base":
-        profile = None
-    elif variant == "calibrated":
-        fp = predict(qs, profile, fit_rows)
-        cal = {q: fit_bias(qs[q]["criteria"], [x[q] for x in fp], [r["answers"][q] for r in fit_rows]) for q in qs}
-    print(json.dumps(metrics(qs, predict(qs, profile, hold), hold, cal), indent=1))
+# candidate -> (backend, served with the profile in front). "base" and "gliner" are also the bars.
+CANDIDATES = {"base": ("djev", False), "base+cal": ("djev", False), "profile": ("djev", True),
+              "profile+cal": ("djev", True), "gliner": ("gliner", False), "gliner+cal": ("gliner", False),
+              "tiny": ("tiny", False)}
 
 
-def cmd_release(cid):
-    t0 = time.time()
-    customer, rows = load_valid(cid)
-    train, hold = P.split(rows)
-    qs = customer["questions"]
-    profile, fit_rows = build_profile(customer, train)
-    fit = lambda preds, rs: {q: fit_bias(qs[q]["criteria"], [x[q] for x in preds], [r["answers"][q] for r in rs]) for q in qs}
-    base_train, base_hold = predict(qs, None, train), predict(qs, None, hold)
-    prof_fit, prof_hold = predict(qs, profile, fit_rows), predict(qs, profile, hold)
-    # candidates: (profile or not) x (calibration or not); base itself is the bar, never a release
-    cands = {"base+cal": (None, fit(base_train, train), base_hold),
-             "profile": (profile, {}, prof_hold),
-             "profile+cal": (profile, fit(prof_fit, fit_rows), prof_hold)}
-    ev = {"base": metrics(qs, base_hold, hold)}
-    ev.update({name: metrics(qs, h, hold, cal) for name, (_, cal, h) in cands.items()})
-    base = ev["base"]
-    # per question: the variant with the lowest holdout log-loss among those that keep accuracy >= base;
-    # a question with no such variant stays on the plain base model
+def choose(questions, ev, bar):
+    """The gate, per question: among candidates with holdout accuracy >= the bar's and log-loss < the bar's, the one
+    with the lowest log-loss; if none passes, the question stays on the bar."""
     plan = {}
-    for q in qs:
-        ok = [n for n in cands if ev[n][q]["accuracy"] >= base[q]["accuracy"] and ev[n][q]["log_loss"] < base[q]["log_loss"]]
-        plan[q] = min(ok, key=lambda n: ev[n][q]["log_loss"]) if ok else "base"
-    per_q = {q: (base[q] if plan[q] == "base" else ev[plan[q]][q]) for q in qs}
+    for q in questions:
+        b = ev[bar][q]
+        ok = [n for n in ev if n != bar and q in ev[n]
+              and ev[n][q]["accuracy"] >= b["accuracy"] and ev[n][q]["log_loss"] < b["log_loss"]]
+        plan[q] = min(ok, key=lambda n: (ev[n][q]["log_loss"], n)) if ok else bar
+    return plan
+
+
+def evaluate(cid, arms):
+    """Every candidate of every arm on the customer's holdout. -> dict with ev, plan and what a release needs."""
+    customer, rows = load_valid(cid)
+    train, hold = P.split(rows)
+    qs = customer["questions"]
+    profile, fit_rows = build_profile(customer, train)
+    states = lambda rs: [r["state"] for r in rs]
+    fit = lambda preds, rs: {q: fit_bias(qs[q]["criteria"], [x[q] for x in preds], [r["answers"][q] for r in rs]) for q in qs}
+    cands, tiny, models = {}, {}, {}  # cands: name -> (calibration {q: bias}, holdout predictions, questions covered)
+    if "djev" in arms:
+        c = B.cache_for(cid, "djev")
+        read = lambda prof, rs: B.djev_read(URL, qs, prof, states(rs), c, WORKERS)
+        base_hold = read(None, hold)
+        prof_hold = read(profile, hold)
+        cands["base"] = ({}, base_hold, list(qs))
+        cands["base+cal"] = (fit(read(None, train), train), base_hold, list(qs))
+        cands["profile"] = ({}, prof_hold, list(qs))
+        cands["profile+cal"] = (fit(read(profile, fit_rows), fit_rows), prof_hold, list(qs))
+    if "gliner" in arms:
+        c = B.cache_for(cid, "gliner")
+        g_hold = B.gliner_read(qs, states(hold), c)
+        cands["gliner"] = ({}, g_hold, list(qs))
+        cands["gliner+cal"] = (fit(B.gliner_read(qs, states(train), c), train), g_hold, list(qs))
+    if "tiny" in arms:
+        t_hold = [{} for _ in hold]
+        for q, spec in qs.items():
+            ok, least = B.tiny_eligible(spec, q, rows)
+            tiny[q] = {"eligible": ok, "least_per_option": least, "min_per_option": B.TINY_MIN_PER_OPTION}
+            if not ok:
+                continue
+            m, tok, secs = B.tiny_fit(q, spec, train)
+            for d, p in zip(t_hold, B.tiny_proba(m, tok, states(hold))):
+                d[q] = p
+            tiny[q]["train_s"] = round(secs, 1)
+            models[q] = (m, tok)
+        if models:
+            cands["tiny"] = ({}, t_hold, list(models))
+    bar = "base" if "djev" in arms else "gliner" if "gliner" in arms else None
+    if bar is None:
+        die(2, f"--arms {','.join(arms)} has no zero-shot bar; include djev (bar: plain djev) or gliner (bar: plain gliner)")
+    ev = {n: metrics(qs_n, h, hold, cal) for n, (cal, h, qs_n) in cands.items()}
+    plan = choose(qs, ev, bar)
+    return {"customer": customer, "qs": qs, "train": train, "hold": hold, "profile": profile, "fit_rows": fit_rows,
+            "cands": cands, "ev": ev, "bar": bar, "plan": plan, "tiny": tiny, "models": models}
+
+
+def cmd_eval(cid, arms):
+    """Print every candidate's holdout accuracy / log-loss per question, and what the gate would pick. Writes nothing
+    but the read caches."""
+    e = evaluate(cid, arms)
+    print(f"customer={cid} holdout n={len(e['hold'])} bar={e['bar']} arms={','.join(arms)}")
+    for q in e["qs"]:
+        cells = " ".join(f"{n}={e['ev'][n][q]['accuracy']}/{e['ev'][n][q]['log_loss']}" for n in e["ev"] if q in e["ev"][n])
+        print(f"  {q}: pick={e['plan'][q]}  acc/ll: {cells}")
+
+
+def _lock(cid):
+    """Exclusive per-customer lock (released on close): two label/release/rollback runs never interleave."""
+    import fcntl
+    f = open(P.customer_dir(cid) / ".lock", "w")
+    fcntl.flock(f, fcntl.LOCK_EX)
+    return f
+
+
+def cmd_rollback(cid, version=None):
+    """Point CURRENT at an earlier release that passed its gate (default: the one before the live one)."""
+    rel = P.customer_dir(cid) / "releases"
+    log = [json.loads(l) for l in (rel / "log.jsonl").read_text().splitlines()] if (rel / "log.jsonl").exists() else []
+    passed = sorted({x["version"] for x in log if x["passed"] and "rollback_from" not in x
+                     and (rel / x["version"] / "release.json").exists()})
+    cur = (rel / "CURRENT").read_text().strip() if (rel / "CURRENT").exists() else None
+    if version is None:
+        older = [v for v in passed if cur is None or v < cur]
+        version = older[-1] if older else None
+    if version not in passed:
+        die(2, f"customer={cid} no passed release {version or 'before ' + str(cur)} to roll back to; passed: {passed[-5:]}")
+    P.write_atomic(rel / "CURRENT", version + "\n")
+    with open(rel / "log.jsonl", "a") as f:
+        f.write(json.dumps({"version": version, "rollback_from": cur, "passed": True,
+                            "at": time.strftime("%Y%m%d-%H%M%S")}) + "\n")
+    print(f"verdict=ROLLED_BACK customer={cid} live={version} was={cur}")
+
+
+def cmd_release(cid, arms, force=False):
+    t0 = time.time()
+    sha = P.data_sha(cid)
+    cur = P.current_release(cid)
+    if cur and not force and cur.get("data_sha") == sha and cur.get("arms") == list(arms):
+        print(f"verdict=UNCHANGED customer={cid} live={cur['version']} built from the same data and arms "
+              f"(data_sha={sha}); add --force to rebuild")
+        return
+    e = evaluate(cid, arms)
+    qs, ev, plan, bar, cands, hold = e["qs"], e["ev"], e["plan"], e["bar"], e["cands"], e["hold"]
+    per_q = {q: ev[plan[q]][q] for q in qs}
     mean = {k: round(sum(per_q[q][k] for q in qs) / len(qs), 4) for k in ("accuracy", "log_loss", "ece")}
-    passed = any(v != "base" for v in plan.values())
+    passed = any(v != bar for v in plan.values())
+    d = P.customer_dir(cid)
+    rel = d / "releases"
     version = time.strftime("%Y%m%d-%H%M%S")
-    release = {"customer": cid, "version": version, "kind": "profile", "base": {"image": IMAGE, "model": MODEL},
-               "questions": qs, "profile": profile,
-               "plan": {q: {"variant": plan[q], "use_profile": plan[q].startswith("profile"),
-                            "calibration": cands[plan[q]][1].get(q, {}) if plan[q] != "base" else {}} for q in qs},
-               "split": {"train": len(train), "few_shot": len(profile["examples"]), "calibration_rows": len(fit_rows),
-                         "holdout": len(hold)},
+    while (rel / version).exists():
+        version += "a"
+    rplan = {}
+    for q in qs:
+        backend, use_profile = CANDIDATES[plan[q]]
+        rplan[q] = {"variant": plan[q], "backend": backend, "use_profile": use_profile,
+                    "calibration": cands[plan[q]][0].get(q, {})}
+        if backend == "tiny":
+            rplan[q]["path"] = B.tiny_dirname(q)
+    release = {"customer": cid, "version": version, "kind": "backends", "arms": list(arms), "bar": bar, "data_sha": sha,
+               "base": {"image": IMAGE, "model": B.DJEV_MODEL}, "gliner_model": B.GLINER_MODEL,
+               "tiny_model": B.TINY_MODEL, "questions": qs, "profile": e["profile"], "plan": rplan, "tiny": e["tiny"],
+               "split": {"train": len(e["train"]), "few_shot": len(e["profile"]["examples"]),
+                         "calibration_rows": len(e["fit_rows"]), "holdout": len(hold)},
                "eval": ev, "released_eval": {**per_q, "_mean": mean},
                "gate": {"passed": passed,
-                        "rule": "per question: holdout accuracy >= base and log-loss < base, else that question stays on base; refuse if every question stays on base"},
+                        "rule": f"per question: holdout accuracy >= {bar} and log-loss < {bar}, lowest log-loss wins; "
+                                f"else that question stays on {bar}; refuse if every question stays on {bar}"},
                "seconds": round(time.time() - t0, 1)}
-    d = P.customer_dir(cid)
-    rdir = d / "releases" / version
-    P.write_atomic(rdir / "release.json", json.dumps(release, indent=1))
-    b = base["_mean"]
-    line = (f"customer={cid} version={version} holdout n={len(hold)} base acc={b['accuracy']} ll={b['log_loss']}"
+    # build in a scratch dir, rename into place, then move CURRENT: a crash leaves the old release live
+    for old in rel.glob(".tmp-*"):
+        shutil.rmtree(old, ignore_errors=True)
+    tmp = rel / f".tmp-{version}"
+    if passed:
+        for q, spec in rplan.items():
+            if spec["backend"] == "tiny":
+                B._tiny().save(*e["models"][q], str(tmp / spec["path"]))
+    P.write_atomic(tmp / "release.json", json.dumps(release, indent=1))
+    os.replace(tmp, rel / version)
+    b = ev[bar]["_mean"]
+    line = (f"customer={cid} version={version} holdout n={len(hold)} bar={bar} acc={b['accuracy']} ll={b['log_loss']}"
             f" -> acc={mean['accuracy']} ll={mean['log_loss']}"
-            + "".join(f" {q}:{plan[q]}={per_q[q]['accuracy']}(base {base[q]['accuracy']})" for q in qs))
+            + "".join(f" {q}:{plan[q]}={per_q[q]['accuracy']}({bar} {ev[bar][q]['accuracy']})" for q in qs))
+    with open(rel / "log.jsonl", "a") as f:
+        f.write(json.dumps({"version": version, "passed": passed, "data_sha": sha, "arms": list(arms), "bar": bar,
+                            "holdout": len(hold), "plan": {q: plan[q] for q in qs},
+                            "accuracy": {q: per_q[q]["accuracy"] for q in qs}, "seconds": release["seconds"]}) + "\n")
     if not passed:
-        die(7, line + f" (nothing beats base; record kept at {rdir}/release.json; CURRENT unchanged)")
-    P.write_atomic(d / "releases" / "CURRENT", version + "\n")
-    print("verdict=RELEASED " + line + f" serve=/c/{cid}/v1/systemone")
+        die(7, line + f" (nothing beats {bar}; record kept at {rel / version}/release.json; CURRENT unchanged)")
+    P.write_atomic(rel / "CURRENT", version + "\n")
+    print("verdict=RELEASED " + line + f" seconds={release['seconds']} serve=/c/{cid}/v1/systemone")
 
 
-def cmd_status():
+def cmd_status(as_json=False):
+    out = []
     for d in P.all_customers():
         r = P.current_release(d.name)
-        where = "example" if d.parent == P.EXAMPLES else "home"
-        if not r:
-            print(f"customer={d.name} ({where}) live=none")
+        s = {"customer": d.name, "where": "example" if d.parent == P.EXAMPLES else "home", "live": None}
+        if r:
+            bar = r.get("bar", "base")
+            s.update({"live": r["version"], "kind": r["kind"], "n": r["split"]["holdout"],
+                      "holdout_acc": r["released_eval"]["_mean"]["accuracy"],
+                      "bar_acc": r["eval"][bar]["_mean"]["accuracy"], "bar": bar,
+                      "stale": r.get("data_sha") != P.data_sha(d.name),
+                      "plan": {q: p.get("variant") for q, p in r["plan"].items()}})
+        out.append(s)
+    if as_json:
+        print(json.dumps(out))
+        return
+    for s in out:
+        if not s["live"]:
+            print(f"customer={s['customer']} ({s['where']}) live=none")
             continue
-        m = r["released_eval"]["_mean"]
-        print(f"customer={d.name} ({where}) live={r['version']} kind={r['kind']} holdout_acc={m['accuracy']} "
-              f"base_acc={r['eval']['base']['_mean']['accuracy']} n={r['split']['holdout']} serve=/c/{d.name}/v1/systemone")
+        print(f"customer={s['customer']} ({s['where']}) live={s['live']} holdout_acc={s['holdout_acc']} "
+              f"{s['bar']}_acc={s['bar_acc']} n={s['n']} stale={str(s['stale']).lower()} "
+              + " ".join(f"{q}={v}" for q, v in s["plan"].items()))
+
+
+def flags(args):
+    """--key value pairs and bare --force. -> (positional, {key: value})."""
+    pos, opt, i = [], {}, 0
+    while i < len(args):
+        if args[i] == "--force" or args[i] == "--json":
+            opt[args[i]] = True
+            i += 1
+        elif args[i].startswith("--") and i + 1 < len(args):
+            opt[args[i]] = args[i + 1]
+            i += 2
+        else:
+            pos.append(args[i])
+            i += 1
+    return pos, opt
+
+
+def parse_arms(opt, default=None):
+    if "--arms" not in opt:
+        return default
+    arms = [a.strip() for a in opt["--arms"].split(",") if a.strip()]
+    bad = [a for a in arms if a not in B.ARMS]
+    if bad or not arms:
+        die(2, f"--arms {opt['--arms']}: choose from {','.join(B.ARMS)}")
+    return arms
+
+
+def run(cmd, cid, args, opt, arms):
+    if cmd == "import":
+        if len(args) < 2 or "--state" not in opt or "--label" not in opt:
+            die(2, "usage: djp.py import <customer> <file.csv|.jsonl> --state <col> --label <col>[,<col>...]")
+        cmd_import(cid, args[1], opt["--state"], [c.strip() for c in opt["--label"].split(",") if c.strip()])
+    elif cmd == "label":
+        if len(args) < 2:
+            die(2, "usage: djp.py label <customer> <file.csv|.jsonl> [--state <col>] [--label <cols>] [--arms ...] [--force]")
+        cols = [c.strip() for c in opt["--label"].split(",") if c.strip()] if "--label" in opt else None
+        cmd_label(cid, args[1], opt.get("--state", "state"), cols, arms, opt.get("--force", False))
+    elif cmd == "check":
+        cmd_check(cid)
+    elif cmd == "release":
+        cmd_release(cid, arms or list(B.ARMS), opt.get("--force", False))
+    elif cmd == "rollback":
+        cmd_rollback(cid, args[1] if len(args) > 1 else None)
+    else:
+        cmd_eval(cid, arms or list(B.ARMS))
 
 
 def main(argv):
-    cmds = ("status", "init", "import", "check", "release", "eval")
-    if not argv or argv[0] not in cmds:
+    if not argv or argv[0] not in COMMANDS:
         print(__doc__)
         return 2
-    cmd, args = argv[0], argv[1:]
+    cmd, (args, opt) = argv[0], flags(argv[1:])
     try:
         if cmd == "status":
-            return cmd_status() or 0
+            return cmd_status(opt.get("--json", False)) or 0
         if not args:
             die(2, f"usage: djp.py {cmd} <customer>")
         cid = args[0]
@@ -293,21 +494,19 @@ def main(argv):
             return cmd_init(cid) or 0
         if P.customer_dir(cid) is None:
             die(2, f"no customer '{cid}' in {P.HOME} or {P.EXAMPLES}. Run: python3 pipeline/djp.py init {cid}")
-        if cmd == "import":
-            opt = {args[i]: args[i + 1] for i in range(2, len(args) - 1, 2)}
-            if len(args) < 2 or "--state" not in opt or "--label" not in opt:
-                die(2, "usage: djp.py import <customer> <file.csv|.jsonl> --state <col> --label <col>[,<col>...]")
-            cmd_import(cid, args[1], opt["--state"], [c.strip() for c in opt["--label"].split(",") if c.strip()])
-        elif cmd == "check":
-            cmd_check(cid)
-        elif cmd == "release":
-            cmd_release(cid)
-        else:
-            cmd_eval(cid, args[1] if len(args) > 1 else "calibrated")
+        lock = _lock(cid) if cmd in ("label", "release", "rollback") else None
+        try:
+            run(cmd, cid, args, opt, parse_arms(opt))
+        finally:
+            if lock:
+                lock.close()
+    except B.NeedsVenv as e:
+        die(2, f"{e}. Run with .venv/bin/python, or pass --arms djev")
     except urllib.error.HTTPError as e:
-        die(2, f"{URL} answered HTTP {e.code}: {e.read()[:200]!r}. Logs: gcloud run services logs read djev --region <region> --limit 50")
+        die(2, f"{URL} answered HTTP {e.code}: {e.read()[:200]!r}. Logs: gcloud run services logs read djev --region us-central1 --limit 50")
     except OSError as e:
-        die(2, f"cannot reach {URL} ({e}). Start: gcloud run services proxy djev --region <region> --port 8081")
+        die(2, f"cannot reach {URL} ({e}). Start: gcloud run services proxy djev --region us-central1 --project djev-ouz56i "
+               f"--port 8081 (reads done so far are cached; re-run the same command), or pass --arms gliner,tiny")
     return 0
 
 

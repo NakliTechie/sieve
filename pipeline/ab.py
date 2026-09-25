@@ -2,7 +2,7 @@
 """A/B: djev (/v1/systemone) vs GLiNER2.5-Decide on the same rows, questions and options, plus an option-order test.
 
   .venv/bin/python pipeline/ab.py run [--arms djev,gliner] [--orders orig,rev,shuf] [--limit N]
-  python3 pipeline/ab.py report [run-dir]          # aggregates -> stdout (markdown); raw rows stay in data/ab
+  python3 pipeline/ab.py report [run-dir]          # aggregates -> stdout (markdown); default: newest run in data/ab
 
 Suite: the held-out rows of every customer in $DJP_HOME and examples (djcore.split), plus the single-choice questions of
 fastino/fast-decisions (data/bench/fast-decisions/*.jsonl, Apache-2.0). Both arms get the same information:
@@ -146,7 +146,9 @@ def pct(x):
 
 
 def cmd_report(args):
-    run = Path(args[0]) if args else sorted(AB.iterdir())[-1]
+    # default: the most recently written run (not the alphabetically last, which picked `smoke` over `full`)
+    run = Path(args[0]) if args else max((d for d in AB.iterdir() if (d / "results.jsonl").exists()),
+                                         key=lambda d: (d / "results.jsonl").stat().st_mtime)
     recs = [json.loads(l) for l in (run / "results.jsonl").read_text().splitlines()]
     ok = [r for r in recs if "error" not in r]
     errs = [r for r in recs if "error" in r]
