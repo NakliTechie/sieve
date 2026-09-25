@@ -160,6 +160,62 @@ class Pipeline(unittest.TestCase):
         self.assertTrue(B.tiny_eligible({"criteria": OPTIONS}, "color", rows(40))[0])
 
 
+def fake_ask(url, questions, state, **kw):
+    """A djev stand-in with a position bias: 0.6 on the first option shown, the rest shared."""
+    out = {}
+    for q, spec in questions.items():
+        opts = spec["criteria"]
+        out[q] = {"probabilities": {o: 0.6 if j == 0 else 0.4 / (len(opts) - 1) for j, o in enumerate(opts)}}
+    return {"answers": out, "model": "fake"}
+
+
+class Averaging(Pipeline):
+    def setUp(self):
+        super().setUp()
+        self._ask = djp.P.ask
+        djp.P.ask = fake_ask
+
+    def tearDown(self):
+        djp.P.ask = self._ask
+        super().tearDown()
+
+    def test_permute_is_deterministic_and_read0_is_identity(self):
+        qs = {"q": {"criteria": ["a", "b", "c", "d"]}}
+        self.assertIs(B.permute(qs, "s", 0), qs)
+        self.assertEqual(B.permute(qs, "s", 1), B.permute(qs, "s", 1))
+        self.assertEqual(sorted(B.permute(qs, "s", 2)["q"]["criteria"]), ["a", "b", "c", "d"])
+
+    def test_averaging_dilutes_position_bias(self):
+        qs = {"q": {"criteria": ["a", "b", "c", "d"]}}
+        one = B.djev_read("x", qs, None, ["some text"], None, 1, 1)[0]["q"]
+        many = B.djev_read("x", qs, None, ["some text"], None, 1, 8)[0]["q"]
+        self.assertAlmostEqual(one["a"], 0.6)
+        self.assertLess(max(many.values()), 0.6)
+        self.assertAlmostEqual(sum(many.values()), 1.0)
+
+    def test_djev_candidates_and_averaged_bar(self):
+        self.assertEqual(djp.candidate("profile@3+cal"), ("djev", True, 3))
+        self.assertEqual(djp.candidate("base"), ("djev", False, 1))
+        self.assertEqual(djp.candidate("gliner+cal"), ("gliner", False, 1))
+        self.assertEqual(self.release("release", "acme", "--arms", "djev,tiny"), 0)
+        rel = json.loads((self.d / "releases" / self.current() / "release.json").read_text())
+        self.assertEqual(rel["bar"], "base@3")
+        self.assertIn("profile@3+cal", rel["eval"])
+        self.assertEqual(rel["djev_reads"], 3)
+        self.assertEqual(rel["plan"]["color"]["backend"], "tiny")
+
+
+    def test_serving_averages_the_same_reads_as_evaluation(self):
+        qs = {"color": {"criteria": ["red", "blue", "green"]}}
+        release = {"customer": "acme", "version": "v", "questions": qs, "profile": None,
+                   "plan": {"color": {"backend": "djev", "use_profile": False, "reads": 3, "calibration": {}}}}
+        served = B.answer("x", release, "a green thing")
+        evald = B.djev_read("x", qs, None, ["a green thing"], None, 1, 3)[0]["color"]
+        self.assertEqual(served["diagnostics"]["calls"], 3)
+        for o, p in evald.items():
+            self.assertAlmostEqual(served["answers"]["color"]["probabilities"][o], p, places=5)
+
+
 class Manifest(unittest.TestCase):
     def test_manifest_covers_every_command(self):
         m = json.loads((ROOT / "tools.json").read_text())

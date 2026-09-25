@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A/B: djev (/v1/systemone) vs GLiNER2.5-Decide on the same rows, questions and options, plus an option-order test.
 
-  .venv/bin/python pipeline/ab.py run [--arms djev,gliner] [--orders orig,rev,shuf] [--limit N]
+  .venv/bin/python pipeline/ab.py run [--arms djev,gliner] [--orders orig,again,rev,shuf] [--limit N] [--run NAME]
+                                    [--reads K] [--source customer|fast-decisions] [--max-seconds S]
   python3 pipeline/ab.py report [run-dir]          # aggregates -> stdout (markdown); default: newest run in data/ab
 
 Suite: the held-out rows of every customer in $DJP_HOME and examples (djcore.split), plus the single-choice questions of
@@ -13,8 +14,13 @@ randomises its answer slots per call), reversed, and shuffled (seeded per row).
 Reported: accuracy per order, flip rate (answer changes when only the order changes), and position bias (how often
 the first / last option shown is picked, against how often it is the right answer).
 
-Results append to data/ab/<run>/results.jsonl as they arrive; re-running `run` with the same --run skips what is done.
+Permutation averaging (--reads K): each (row, order) is read K times, read 0 in that order and reads 1..K-1 in
+shuffled orders; `report` then scores the average of the first k reads for every k <= K (flip rate, accuracy, cost).
+
+Results append to data/ab/<run>/results.jsonl as they arrive; re-running `run` with the same --run skips what is done
+(per read, so --reads 5 after --reads 3 adds only reads 3 and 4). --max-seconds stops cleanly (exit 3, resumable).
 Env: DJEV_URL (default http://localhost:8081), DJEV_WORKERS (default 8), GLINER_MODEL (default fastino/GLiNER2.5-Decide).
+Records before 2026-09-26 carry picks only (no probabilities, no `read`); they count as read 0 in `report`.
 """
 import json
 import os
@@ -26,11 +32,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import backends as B  # noqa: E402
 import djcore as P  # noqa: E402
 
 URL = os.environ.get("DJEV_URL", "http://localhost:8081")
 WORKERS = int(os.environ.get("DJEV_WORKERS", "8"))
-GLINER = os.environ.get("GLINER_MODEL", "fastino/GLiNER2.5-Decide")
 BENCH = P.DATA / "bench" / "fast-decisions"
 AB = P.DATA / "ab"
 
@@ -68,76 +74,92 @@ def ordered(item, order):
 
 
 def arm_djev(text, qs):
+    """-> ({q: {option: p}}, round-trip ms, server ms)."""
     t0 = time.time()
     r = P.ask(URL, {q: {"type": "choice", "instructions": q.replace("_", " "), "criteria": o} for q, o in qs.items()}, text)
-    return {q: r["answers"][q]["choice"] for q in qs}, \
-           {q: r["answers"][q].get("confidence") for q in qs}, round((time.time() - t0) * 1000, 1), \
-           r.get("diagnostics", {}).get("timing", {}).get("total_ms")
-
-
-_gl, _gl_lock = None, threading.Lock()
+    return {q: r["answers"][q]["probabilities"] for q in qs}, round((time.time() - t0) * 1000, 1), \
+        r.get("diagnostics", {}).get("timing", {}).get("total_ms")
 
 
 def arm_gliner(text, qs):
-    global _gl
-    with _gl_lock:  # one model instance; GPU/MPS calls serialised
-        if _gl is None:
-            from gliner2 import AutoExtractor
-            _gl = AutoExtractor.from_pretrained(GLINER)
-        schema = _gl.create_schema()
-        for q, o in qs.items():
-            schema = schema.classification(q, o)
-        t0 = time.time()
-        r = _gl.extract(text, schema, include_confidence=True)
-        ms = round((time.time() - t0) * 1000, 1)
-    pick = {q: (r.get(q) or {}).get("label") if isinstance(r.get(q), dict) else r.get(q) for q in qs}
-    conf = {q: (r.get(q) or {}).get("confidence") if isinstance(r.get(q), dict) else None for q in qs}
-    return pick, conf, ms, ms
+    t0 = time.time()
+    probs = B.gliner_read({q: {"criteria": o} for q, o in qs.items()}, [text])[0]
+    ms = round((time.time() - t0) * 1000, 1)
+    return probs, ms, ms
 
 
 ARMS = {"djev": (arm_djev, WORKERS), "gliner": (arm_gliner, 1)}
+
+
+def permuted(item, order, i):
+    """Read 0 shows the options in `order`; read i > 0 in an order shuffled by (item, order, i), independent across
+    orders, so averaging over reads is compared fairly between orig and rev."""
+    qs = ordered(item, order)
+    if i == 0:
+        return qs
+    rng = random.Random(f"{item['id']}|{order}|{i}")
+    return {q: rng.sample(o, len(o)) for q, o in qs.items()}
 
 
 def cmd_run(args):
     opt = {args[i]: args[i + 1] for i in range(0, len(args) - 1, 2)}
     arms = opt.get("--arms", "djev,gliner").split(",")
     orders = opt.get("--orders", "orig,again,rev,shuf").split(",")
+    reads = int(opt.get("--reads", 1))
     limit = int(opt["--limit"]) if "--limit" in opt else None
+    budget_s = float(opt.get("--max-seconds", 0)) or None  # stop cleanly (resumable) after this long
     run = AB / opt.get("--run", time.strftime("%Y%m%d"))
     run.mkdir(parents=True, exist_ok=True)
     out = run / "results.jsonl"
     done = set()
     if out.exists():
         for line in out.read_text().splitlines():
-            x = json.loads(line)
-            done.add((x["arm"], x["order"], x["id"]))
-    items = suite(limit)
+            try:
+                x = json.loads(line)
+            except ValueError:
+                continue  # a line torn by a kill; that read is redone
+            if "error" not in x:
+                done.add((x["arm"], x["order"], x["id"], x.get("read", 0)))
+    items = [it for it in suite(limit) if opt.get("--source", it["source"]) == it["source"]]
     lock = threading.Lock()
+    t_start = time.time()
     for arm in arms:
         fn, workers = ARMS[arm]
-        todo = [(o, it) for o in orders for it in items if (arm, o, it["id"]) not in done]
-        print(f"arm={arm} items={len(items)} orders={orders} todo={len(todo)}", flush=True)
-        t0, n = time.time(), [0]
+        todo = [(o, it, i) for i in range(reads) for o in orders for it in items if (arm, o, it["id"], i) not in done]
+        print(f"arm={arm} items={len(items)} orders={orders} reads={reads} todo={len(todo)}", flush=True)
+        t0, n, stop = time.time(), [0], threading.Event()
 
         def one(job):
-            order, it = job
-            qs = ordered(it, order)
+            if stop.is_set():
+                return
+            if budget_s and time.time() - t_start > budget_s:
+                stop.set()
+                return
+            order, it, i = job
+            qs = permuted(it, order, i)
+            base = {"arm": arm, "order": order, "read": i, "id": it["id"], "source": it["source"], "domain": it["domain"]}
             try:
-                pick, conf, ms, server_ms = fn(it["text"], qs)
-                rec = {"arm": arm, "order": order, "id": it["id"], "source": it["source"], "domain": it["domain"],
-                       "shown": qs, "truth": it["truth"], "pick": pick, "conf": conf, "ms": ms, "server_ms": server_ms}
-            except Exception as e:  # recorded, not fatal: one bad row must not lose a 10-minute run
-                rec = {"arm": arm, "order": order, "id": it["id"], "source": it["source"], "domain": it["domain"],
-                       "error": f"{type(e).__name__}: {str(e)[:200]}"}
+                probs, ms, server_ms = fn(it["text"], qs)
+                rec = {**base, "shown": qs, "truth": it["truth"], "probs": probs,
+                       "pick": {q: max(p, key=p.get) for q, p in probs.items()}, "ms": ms, "server_ms": server_ms}
+            except Exception as e:  # recorded, not fatal: one bad row must not lose a long run
+                rec = {**base, "error": f"{type(e).__name__}: {str(e)[:200]}"}
             with lock:
                 with open(out, "a") as f:
                     f.write(json.dumps(rec) + "\n")
                 n[0] += 1
-                if n[0] % 200 == 0:
+                if n[0] % 500 == 0:
                     print(f"  {arm}: {n[0]}/{len(todo)} in {round(time.time() - t0)} s", flush=True)
         with ThreadPoolExecutor(workers) as ex:
             list(ex.map(one, todo))
-        print(f"arm={arm} finished {len(todo)} in {round(time.time() - t0)} s", flush=True)
+        secs = round(time.time() - t0, 1)
+        with open(run / "meta.jsonl", "a") as f:
+            f.write(json.dumps({"arm": arm, "calls": n[0], "seconds": secs, "workers": workers, "reads": reads,
+                                "at": time.strftime("%Y%m%d-%H%M%S")}) + "\n")
+        print(f"arm={arm} finished {n[0]} in {secs} s" + (" (stopped at --max-seconds)" if stop.is_set() else ""), flush=True)
+        if stop.is_set():
+            print(f"verdict=STOPPED run={run} budget reached; re-run the same command to resume")
+            return 3
     print(f"verdict=DONE run={run} next: python3 pipeline/ab.py report {run}")
 
 
@@ -149,8 +171,16 @@ def cmd_report(args):
     # default: the most recently written run (not the alphabetically last, which picked `smoke` over `full`)
     run = Path(args[0]) if args else max((d for d in AB.iterdir() if (d / "results.jsonl").exists()),
                                          key=lambda d: (d / "results.jsonl").stat().st_mtime)
-    recs = [json.loads(l) for l in (run / "results.jsonl").read_text().splitlines()]
-    ok = [r for r in recs if "error" not in r]
+    recs = []
+    for line in (run / "results.jsonl").read_text().splitlines():
+        try:
+            recs.append(json.loads(line))
+        except ValueError:
+            pass
+    allok = [r for r in recs if "error" not in r]
+    ok = [r for r in allok if r.get("read", 0) == 0]
+    errs_all = [r for r in recs if "error" in r]
+    recs = [r for r in recs if r.get("read", 0) == 0]
     errs = [r for r in recs if "error" in r]
     arms = sorted({r["arm"] for r in ok})
     orders = [o for o in ("orig", "again", "rev", "shuf") if any(r["order"] == o for r in ok)]
@@ -206,10 +236,57 @@ def cmd_report(args):
         m = sorted(r["ms"] for r in ok if r["arm"] == a)
         q = lambda xs, p: f"{xs[min(int(len(xs) * p), len(xs) - 1)]:.0f} ms" if xs else "–"
         print(f"| {a} | {q(s, .5)} | {q(s, .95)} | {q(m, .5)} |")
+    if any(r.get("read", 0) > 0 for r in allok):
+        perm_report(run, allok)
+    if errs_all:
+        errs = errs_all
     if errs:
         print("\n## Errors\n")
         for e in sorted({(r['arm'], r['domain'], r['error']) for r in errs})[:10]:
             print(f"- {e[0]} {e[1]}: {e[2]}")
+
+
+def perm_report(run, recs):
+    """Average of the first k reads (shuffled option orders) for every k: accuracy per order, flip rates, cost."""
+    by = {}
+    for r in recs:
+        by.setdefault((r["arm"], r["order"], r["id"]), {})[r.get("read", 0)] = r
+    meta = [json.loads(l) for l in (run / "meta.jsonl").read_text().splitlines()] if (run / "meta.jsonl").exists() else []
+    print("\n## Permutation averaging (average of k reads over shuffled option orders)\n")
+    print("Each row is the same decisions scored on the average of reads 0..k-1. Only (row, order) pairs with all k "
+          "reads count. Flip: answer changes against the original order. Cost: calls per decision = k.\n")
+    print("| Arm | Rows | k | Decisions | Acc orig | Acc again | Acc rev | Acc shuf | Flip again (noise) | Flip rev | Flip shuf |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for arm in sorted({k[0] for k in by}):
+        for src in ("fast-decisions", "customer"):
+            kmax = max((len(v) for (a, o, i), v in by.items() if a == arm and v and next(iter(v.values()))["source"] == src),
+                       default=0)
+            for k in range(1, kmax + 1):
+                picks = {}
+                for (a, o, i), v in by.items():
+                    if a != arm or not all(j in v for j in range(k)) or v[0]["source"] != src or "probs" not in v[0]:
+                        continue
+                    avg = {q: {opt: sum(v[j]["probs"][q].get(opt, 0) for j in range(k)) / k for opt in v[0]["probs"][q]}
+                           for q in v[0]["probs"]}
+                    picks[(o, i)] = ({q: max(p, key=p.get) for q, p in avg.items()}, v[0]["truth"])
+                if not picks:
+                    continue
+                acc, flip = {}, {}
+                for o in ("orig", "again", "rev", "shuf"):
+                    hits = [pk[q] == t[q] for (oo, _), (pk, t) in picks.items() if oo == o for q in t]
+                    acc[o] = pct(sum(hits) / len(hits)) if hits else "–"
+                    if o != "orig":
+                        f = [picks[(o, i)][0][q] != picks[("orig", i)][0][q]
+                             for (oo, i) in picks if oo == o and ("orig", i) in picks for q in picks[(o, i)][1]]
+                        flip[o] = pct(sum(f) / len(f)) if f else "–"
+                n = sum(len(t) for (oo, _), (_, t) in picks.items() if oo == "orig")
+                print(f"| {arm} | {src} | {k} | {n} | {acc['orig']} | {acc['again']} | {acc['rev']} | {acc['shuf']} | "
+                      f"{flip['again']} | {flip['rev']} | {flip['shuf']} |")
+    for m in meta:
+        if m["calls"] and m["arm"] == "djev":
+            cps = m["calls"] / m["seconds"]
+            print(f"\ndjev pass {m['at']}: {m['calls']} calls in {m['seconds']} s at {m['workers']} parallel = "
+                  f"{cps:.1f} calls/s, ${3.19 / 3600 / cps * 1000:.3f} per 1,000 calls while the GPU is busy.")
 
 
 def main(argv):

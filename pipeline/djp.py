@@ -246,10 +246,13 @@ def load_valid(cid):
     return customer, rows
 
 
-# candidate -> (backend, served with the profile in front). "base" and "gliner" are also the bars.
-CANDIDATES = {"base": ("djev", False), "base+cal": ("djev", False), "profile": ("djev", True),
-              "profile+cal": ("djev", True), "gliner": ("gliner", False), "gliner+cal": ("gliner", False),
-              "tiny": ("tiny", False)}
+def candidate(name):
+    """-> (backend, served with the profile in front, djev reads averaged). base@N / gliner are also the bars.
+    Names: base, profile (+cal), their @N forms (N reads over shuffled option orders), gliner(+cal), tiny."""
+    head = name.split("+")[0]
+    if head.startswith(("base", "profile")):
+        return "djev", head.startswith("profile"), int(head.split("@")[1]) if "@" in head else 1
+    return head, False, 1
 
 
 def choose(questions, ev, bar):
@@ -273,15 +276,16 @@ def evaluate(cid, arms):
     states = lambda rs: [r["state"] for r in rs]
     fit = lambda preds, rs: {q: fit_bias(qs[q]["criteria"], [x[q] for x in preds], [r["answers"][q] for r in rs]) for q in qs}
     cands, tiny, models = {}, {}, {}  # cands: name -> (calibration {q: bias}, holdout predictions, questions covered)
+    n = B.DJEV_READS
     if "djev" in arms:
         c = B.cache_for(cid, "djev")
-        read = lambda prof, rs: B.djev_read(URL, qs, prof, states(rs), c, WORKERS)
-        base_hold = read(None, hold)
-        prof_hold = read(profile, hold)
-        cands["base"] = ({}, base_hold, list(qs))
-        cands["base+cal"] = (fit(read(None, train), train), base_hold, list(qs))
-        cands["profile"] = ({}, prof_hold, list(qs))
-        cands["profile+cal"] = (fit(read(profile, fit_rows), fit_rows), prof_hold, list(qs))
+        read = lambda prof, rs, k=1: B.djev_read(URL, qs, prof, states(rs), c, WORKERS, k)
+        for tag, k in [("", 1)] + ([(f"@{n}", n)] if n > 1 else []):
+            base_hold, prof_hold = read(None, hold, k), read(profile, hold, k)
+            cands["base" + tag] = ({}, base_hold, list(qs))
+            cands[f"base{tag}+cal"] = (fit(read(None, train, k), train), base_hold, list(qs))
+            cands["profile" + tag] = ({}, prof_hold, list(qs))
+            cands[f"profile{tag}+cal"] = (fit(read(profile, fit_rows, k), fit_rows), prof_hold, list(qs))
     if "gliner" in arms:
         c = B.cache_for(cid, "gliner")
         g_hold = B.gliner_read(qs, states(hold), c)
@@ -301,7 +305,7 @@ def evaluate(cid, arms):
             models[q] = (m, tok)
         if models:
             cands["tiny"] = ({}, t_hold, list(models))
-    bar = "base" if "djev" in arms else "gliner" if "gliner" in arms else None
+    bar = (f"base@{n}" if n > 1 else "base") if "djev" in arms else "gliner" if "gliner" in arms else None
     if bar is None:
         die(2, f"--arms {','.join(arms)} has no zero-shot bar; include djev (bar: plain djev) or gliner (bar: plain gliner)")
     ev = {n: metrics(qs_n, h, hold, cal) for n, (cal, h, qs_n) in cands.items()}
@@ -351,7 +355,8 @@ def cmd_release(cid, arms, force=False):
     t0 = time.time()
     sha = P.data_sha(cid)
     cur = P.current_release(cid)
-    if cur and not force and cur.get("data_sha") == sha and cur.get("arms") == list(arms):
+    if (cur and not force and cur.get("data_sha") == sha and cur.get("arms") == list(arms)
+            and ("djev" not in arms or cur.get("djev_reads", 1) == B.DJEV_READS)):
         print(f"verdict=UNCHANGED customer={cid} live={cur['version']} built from the same data and arms "
               f"(data_sha={sha}); add --force to rebuild")
         return
@@ -367,12 +372,13 @@ def cmd_release(cid, arms, force=False):
         version += "a"
     rplan = {}
     for q in qs:
-        backend, use_profile = CANDIDATES[plan[q]]
-        rplan[q] = {"variant": plan[q], "backend": backend, "use_profile": use_profile,
+        backend, use_profile, reads = candidate(plan[q])
+        rplan[q] = {"variant": plan[q], "backend": backend, "use_profile": use_profile, "reads": reads,
                     "calibration": cands[plan[q]][0].get(q, {})}
         if backend == "tiny":
             rplan[q]["path"] = B.tiny_dirname(q)
     release = {"customer": cid, "version": version, "kind": "backends", "arms": list(arms), "bar": bar, "data_sha": sha,
+               "djev_reads": B.DJEV_READS,
                "base": {"image": IMAGE, "model": B.DJEV_MODEL}, "gliner_model": B.GLINER_MODEL,
                "tiny_model": B.TINY_MODEL, "questions": qs, "profile": e["profile"], "plan": rplan, "tiny": e["tiny"],
                "split": {"train": len(e["train"]), "few_shot": len(e["profile"]["examples"]),

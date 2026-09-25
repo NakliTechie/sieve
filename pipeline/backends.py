@@ -17,6 +17,7 @@ gliner and tiny need torch + transformers + gliner2 (the .venv); they are import
 import hashlib
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -31,6 +32,7 @@ GLINER_MODEL = os.environ.get("GLINER_MODEL", "fastino/GLiNER2.5-Decide")
 TINY_MODEL = "jhu-clsp/ettin-encoder-17m"
 TINY_MIN_PER_OPTION = 20  # labelled rows per option (all rows, not only training) before tiny is a candidate
 TINY_EPOCHS, TINY_LR, TINY_MAX_LEN = 10, 1e-4, 256
+DJEV_READS = int(os.environ.get("DJEV_READS", "3"))  # reads averaged over option orders for the bar and the @N candidates
 ARMS = ("djev", "gliner", "tiny")
 
 
@@ -82,20 +84,44 @@ def cache_for(cid, arm):
 
 # ---------- djev ----------
 
-def djev_read(url, questions, profile, states, cache=None, workers=8):
-    """-> [{q: {option: p}}] raw probabilities (no calibration), one /v1/systemone call per uncached state."""
-    def one(state):
+def permute(questions, state, i):
+    """Read i of a state: read 0 shows the options as given; read i > 0 shows each question's options in an order
+    shuffled by a seed from (state, question, i). Same text -> same orders, so evaluation and serving see the same
+    reads. Averaging reads over orders is the published fix for position effects (TypeLLM permutation averaging)."""
+    if i == 0:
+        return questions
+    out = {}
+    for q, spec in questions.items():
+        opts = list(spec["criteria"])
+        random.Random(_key("perm", state, q, i)).shuffle(opts)
+        out[q] = {**spec, "criteria": opts}
+    return out
+
+
+def average(reads):
+    """[{q: {option: p}}] over reads of one state -> {q: {option: mean p}}."""
+    return {q: {o: sum(r[q].get(o, 0.0) for r in reads) / len(reads) for o in reads[0][q]} for q in reads[0]}
+
+
+def djev_read(url, questions, profile, states, cache=None, workers=8, reads=1):
+    """-> [{q: {option: p}}] raw probabilities (no calibration), averaged over `reads` option orders (permute);
+    one /v1/systemone call per uncached (state, read)."""
+    def one(job):
+        state, i = job
         text = P.render_state(profile, state)
-        k = _key("djev", DJEV_MODEL, questions, text)
+        qs = permute(questions, state, i)
+        k = _key("djev", DJEV_MODEL, qs, text) if i == 0 else _key("djev", DJEV_MODEL, qs, text, i)
         hit = cache.get(k) if cache else None
         if hit is None:
-            a = P.ask(url, questions, text)["answers"]
-            hit = {q: a[q]["probabilities"] for q in questions}
+            a = P.ask(url, qs, text)["answers"]
+            hit = {q: a[q]["probabilities"] for q in qs}
             if cache:
                 cache.put(k, hit)
         return hit
+    jobs = [(s, i) for s in states for i in range(reads)]
     with ThreadPoolExecutor(workers) as ex:
-        return list(ex.map(one, states))
+        flat = list(ex.map(one, jobs))
+    return [average(flat[j * reads:(j + 1) * reads]) for j in range(len(states))]
 
 
 # ---------- gliner ----------
@@ -202,23 +228,23 @@ def _tiny_model(path):
 
 def answer(url, release, state):
     """Serve one call for a released customer, each question on its planned backend and calibration.
-    djev questions: at most two calls (with and without profile), in parallel with the local backends."""
+    djev questions: one call per (with/without profile) x read, all in parallel with the local backends."""
     rdir = P.customer_dir(release["customer"]) / "releases" / release["version"]
     plan, qs = release["plan"], release["questions"]
     t0 = time.time()
     by = {}
     for q, spec in plan.items():
-        by.setdefault((spec["backend"], spec.get("use_profile", False)), {})[q] = qs[q]
+        by.setdefault((spec["backend"], spec.get("use_profile", False), spec.get("reads", 1)), {})[q] = qs[q]
     raw, calls, model = {}, 0, None
 
-    def djev_group(item):
-        (_, use_profile), group = item
-        return P.ask(url, group, P.render_state(release["profile"] if use_profile else None, state))
+    def djev_call(job):
+        (_, use_profile, _), group, i = job
+        return P.ask(url, permute(group, state, i), P.render_state(release["profile"] if use_profile else None, state))
 
-    djev_groups = [i for i in by.items() if i[0][0] == "djev"]
-    with ThreadPoolExecutor(max(1, len(djev_groups))) as ex:
-        futs = [ex.submit(djev_group, i) for i in djev_groups]
-        for (backend, _), group in by.items():
+    djev_jobs = [(k, g, i) for k, g in by.items() if k[0] == "djev" for i in range(k[2])]
+    with ThreadPoolExecutor(max(1, len(djev_jobs))) as ex:
+        futs = [(job, ex.submit(djev_call, job)) for job in djev_jobs]
+        for (backend, _, _), group in by.items():
             if backend == "gliner":
                 raw.update(gliner_read(group, [state])[0])
                 calls += 1
@@ -227,11 +253,14 @@ def answer(url, release, state):
                     m, tok = _tiny_model(str(rdir / plan[q]["path"]))
                     raw[q] = tiny_proba(m, tok, [state])[0]
                     calls += 1
-        for f in futs:
+        per_group = {}
+        for (key, group, i), f in futs:
             r = f.result()
             model = r.get("model")
-            raw.update({q: a.get("probabilities", {}) for q, a in r.get("answers", {}).items()})
+            per_group.setdefault(key, []).append({q: a.get("probabilities", {}) for q, a in r.get("answers", {}).items()})
             calls += 1
+        for reads in per_group.values():
+            raw.update(average(reads))
     out = {}
     for q in plan:
         p = P.calibrate(raw[q], plan[q]["calibration"])
