@@ -3,3 +3,4 @@
 plan/
 .venv*/
 __pycache__/
+data/

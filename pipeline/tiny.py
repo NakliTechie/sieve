@@ -4,12 +4,12 @@
   .venv/bin/python pipeline/tiny.py banking77 [--per-class N] [--model M] [--epochs E]
   .venv/bin/python pipeline/tiny.py customer <id> [--model M] [--epochs E]
 
-banking77: train on ~/.djev/bench/banking77/train.csv (optionally N rows per class), score the 3,080-message test set.
+banking77: train on data/bench/banking77/train.csv (optionally N rows per class), score the 3,080-message test set.
 customer: train on the customer's training split (djcore.split), score their held-out rows, one classifier per
 question: the same rows pipeline/ab.py scored for djev and GLiNER.
 
 Default model jhu-clsp/ettin-encoder-17m (MIT). Runs on Apple MPS, CUDA or CPU. Prints one verdict line with accuracy,
-train seconds and rows; appends it to ~/.djev/tiny/log.jsonl. Needs torch + transformers (the .venv env).
+train seconds and rows; appends it to data/tiny/log.jsonl. Needs torch + transformers (the .venv env).
 """
 import csv
 import json
@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import djcore as P  # noqa: E402
 
 DEV = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-LOG = Path.home() / ".djev" / "tiny" / "log.jsonl"
+LOG = P.DATA / "tiny" / "log.jsonl"
 
 
 def train_eval(train, test, labels, model_id, epochs, lr, max_len, bs=32, seed=0):
@@ -73,7 +73,7 @@ def log(rec):
 
 
 def cmd_banking77(opt):
-    d = Path.home() / ".djev" / "bench" / "banking77"
+    d = P.DATA / "bench" / "banking77"
     read = lambda f: [(r["text"], r["category"]) for r in csv.DictReader(open(d / f, encoding="utf-8"))]
     train, test = read("train.csv"), read("test.csv")
     labels = sorted({l for _, l in train})

@@ -9,7 +9,7 @@
   python3 pipeline/djp.py release <customer>                   # eval base -> candidates -> per-question gate -> release
   python3 pipeline/djp.py eval <customer> [base|profile|calibrated]   # holdout metrics for one variant
 
-Customer data lives in $DJP_HOME (default ~/.djev/customers), outside the repo. Layer 1 (this file): a release is the
+Customer data lives in $DJP_HOME (default data/customers, gitignored). Layer 1 (this file): a release is the
 customer's rules + examples (profile) + per-option calibration, served on the shared model at
 /c/<customer>/v1/systemone. Layer 2 (TRAINING.md) swaps the profile for trained weights behind the same gate.
 

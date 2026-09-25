@@ -27,7 +27,7 @@ $DJP_HOME/<id>/customer.json + data.jsonl  questions, rules in words, labelled r
 
 Onboarding: `djp.py init <customer>`, `import <file> --state <col> --label <cols>` (their CSV or JSONL, their
 column names), `check` (validation, no GPU), `release`. Customer data lives in `$DJP_HOME` (default
-`~/.djev/customers`), never in the repo. Served at `/c/<customer>/v1/systemone`.
+`data/customers`, gitignored), never in git. Served at `/c/<customer>/v1/systemone`.
 
 No training. The release is the person's rules and a few worked examples placed in front of the state, plus a
 per-option calibration (a log-prior shift fitted on their training rows). The plan picks a variant per question.

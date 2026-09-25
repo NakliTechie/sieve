@@ -2,10 +2,10 @@
 """A/B: djev (/v1/systemone) vs GLiNER2.5-Decide on the same rows, questions and options, plus an option-order test.
 
   .venv/bin/python pipeline/ab.py run [--arms djev,gliner] [--orders orig,rev,shuf] [--limit N]
-  python3 pipeline/ab.py report [run-dir]          # aggregates -> stdout (markdown); raw rows stay in ~/.djev/ab
+  python3 pipeline/ab.py report [run-dir]          # aggregates -> stdout (markdown); raw rows stay in data/ab
 
 Suite: the held-out rows of every customer in $DJP_HOME and examples (djcore.split), plus the single-choice questions of
-fastino/fast-decisions (~/.djev/bench/fast-decisions/*.jsonl, Apache-2.0). Both arms get the same information:
+fastino/fast-decisions (data/bench/fast-decisions/*.jsonl, Apache-2.0). Both arms get the same information:
 question name + options. No customer rules, no few-shot, no calibration: this compares base models.
 
 Order sub-test: each row runs with options in the original order, the original order again (the noise floor: djev
@@ -13,7 +13,7 @@ randomises its answer slots per call), reversed, and shuffled (seeded per row).
 Reported: accuracy per order, flip rate (answer changes when only the order changes), and position bias (how often
 the first / last option shown is picked, against how often it is the right answer).
 
-Results append to ~/.djev/ab/<run>/results.jsonl as they arrive; re-running `run` with the same --run skips what is done.
+Results append to data/ab/<run>/results.jsonl as they arrive; re-running `run` with the same --run skips what is done.
 Env: DJEV_URL (default http://localhost:8081), DJEV_WORKERS (default 8), GLINER_MODEL (default fastino/GLiNER2.5-Decide).
 """
 import json
@@ -31,8 +31,8 @@ import djcore as P  # noqa: E402
 URL = os.environ.get("DJEV_URL", "http://localhost:8081")
 WORKERS = int(os.environ.get("DJEV_WORKERS", "8"))
 GLINER = os.environ.get("GLINER_MODEL", "fastino/GLiNER2.5-Decide")
-BENCH = Path.home() / ".djev" / "bench" / "fast-decisions"
-AB = Path.home() / ".djev" / "ab"
+BENCH = P.DATA / "bench" / "fast-decisions"
+AB = P.DATA / "ab"
 
 
 def suite(limit=None):

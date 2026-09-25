@@ -3,7 +3,7 @@
 Shared by the release pipeline (djp.py) and the serving route (demo/serve.py), so what is evaluated is what is served.
 Stdlib only.
 
-A customer lives in $DJP_HOME/<id>/ (default ~/.djev/customers, outside the repo so customer data never reaches git);
+A customer lives in $DJP_HOME/<id>/ (default data/customers in this repo, gitignored so customer data never reaches git);
 the repo's pipeline/examples/<id>/ holds made-up samples and is searched second.
   customer.json   id, questions (systemone format), context (their rules, in words), few_shot (count)
   data.jsonl      labelled rows: {"state": "...", "answers": {"<question>": "<option>", ...}}
@@ -19,7 +19,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-HOME = Path(os.environ.get("DJP_HOME", Path.home() / ".djev" / "customers"))
+DATA = Path(os.environ.get("SIEVE_DATA", Path(__file__).resolve().parent.parent / "data"))  # gitignored
+HOME = Path(os.environ.get("DJP_HOME", DATA / "customers"))
 EXAMPLES = Path(__file__).with_name("examples")
 HOLDOUT_TENTHS = 3  # rows whose state hashes into 0..2 of 10 are held out: stable across runs and machines
 

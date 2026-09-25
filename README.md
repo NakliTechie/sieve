@@ -23,7 +23,7 @@ git clone https://github.com/NakliTechie/sieve && cd sieve
 uv venv .venv --python 3.12 && VIRTUAL_ENV=.venv uv pip install "gliner2[train]"
 ```
 
-Customer data lives in `~/.djev/customers` (`$DJP_HOME`), never in the repo. The djev arm also needs
+Data lives in `data/` (gitignored): customers in `data/customers` (`$DJP_HOME`), benchmarks, A/B rows, the training log. Customer data never goes in git. The djev arm also needs
 `gcloud run services proxy djev --region us-central1 --project djev-ouz56i --port 8081`.
 
 ## Commands
