@@ -63,7 +63,7 @@ def rows_for(release, hold):
     return chosen, barp
 
 
-def reread(cids):
+def cmd_reread(cids):
     """How much the bar moves on a second read: plain djev with 1 read and with DJEV_READS reads, uncached, against
     the cached reads the gate used. Costs (1 + DJEV_READS) calls per holdout row."""
     import time
@@ -94,7 +94,7 @@ def reread(cids):
 
 def main(argv):
     if argv[:1] == ["reread"]:
-        return reread(argv[1:] or ["shop", "helpdesk", "moderation"])
+        return cmd_reread(argv[1:] or ["shop", "helpdesk", "moderation"])
     cids = argv or [d.name for d in P.all_customers() if P.current_release(d.name)]
     reread = {}
     for f in sorted(P.DATA.glob("releases-reread-*.json")):

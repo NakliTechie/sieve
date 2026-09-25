@@ -75,9 +75,9 @@ python3 pipeline/djp.py check <c>                              # validate; no mo
 .venv/bin/python pipeline/djp.py label <c> <file>                        # append labels -> retrain -> gate -> release
 python3 pipeline/djp.py rollback <c> [version]                 # CURRENT -> an earlier passing release
 .venv/bin/python pipeline/serve.py                             # POST /c/<c>/v1/systemone, GET /c/<c>
-.venv/bin/python pipeline/compare.py                           # markdown table of live releases, with sign tests
+.venv/bin/python pipeline/compare.py [reread]                  # table of live releases with sign tests | bar re-read noise
 python3 pipeline/samples.py build shop|helpdesk|moderation     # stand-in customers from public HF data
-.venv/bin/python pipeline/ab.py run && python3 pipeline/ab.py report     # djev vs GLiNER + option-order test
+.venv/bin/python pipeline/ab.py run [--reads K] && python3 pipeline/ab.py report   # djev vs GLiNER, option order, averaging
 .venv/bin/python pipeline/tiny.py banking77 | customer <c>     # tiny benchmark
 ```
 

@@ -188,7 +188,7 @@ def cmd_report(args):
     # accuracy by source x arm x order
     print("## Accuracy\n\n| Rows | Questions | " + " | ".join(f"{a} {o}" for a in arms for o in orders) + " |")
     print("|---|---|" + "---|" * (len(arms) * len(orders)))
-    groups = [("fast-decisions (all 16 domains)", lambda r: r["source"] == "fast-decisions")] + \
+    groups = [("fast-decisions (all 17 domains)", lambda r: r["source"] == "fast-decisions")] + \
              [(f"customer {d}", (lambda d: lambda r: r["domain"] == d)(d))
               for d in sorted({r["domain"] for r in ok if r["source"] == "customer"})] + \
              [(f"fd {d}", (lambda d: lambda r: r["domain"] == d)(d))

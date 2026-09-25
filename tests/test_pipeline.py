@@ -223,7 +223,7 @@ class Manifest(unittest.TestCase):
         for cmd in djp.COMMANDS:
             self.assertIn(f"djp.{cmd}", names)
         for extra in ("serve.answer", "serve.release", "samples.build", "ab.run", "ab.report", "tiny.banking77",
-                      "tiny.customer", "djp.rollback"):
+                      "tiny.customer", "djp.rollback", "compare.table", "compare.reread"):
             self.assertIn(extra, names)
         for t in m["tools"]:
             self.assertIn(t.get("delegable"), ("agent", "person-only"), t["name"])

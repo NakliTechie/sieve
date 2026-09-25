@@ -18,7 +18,8 @@ exactly as it was scored.
 L0 labels      data/customers/<c>/customer.json + data.jsonl      the person's ground truth (person-only writes)
 L1 split       djcore.split: sha1(text) % 10 < 3 -> holdout        fixed by the text; nobody chooses it
 L2 reads       backends.py: djev | gliner | tiny -> {option: p}    djev + gliner cached per customer (cache/*.jsonl)
-L3 candidates  djp.evaluate: base+cal, profile(+cal), gliner(+cal), tiny (>= 20 rows/option)
+L3 candidates  djp.evaluate: base(+cal), profile(+cal), each also @3 (3 reads over shuffled option orders),
+               gliner(+cal), tiny (>= 20 rows/option)
 L4 gate        djp.choose: acc >= bar and log-loss < bar, lowest log-loss wins, else the bar
 L5 release     releases/<v>/release.json + tiny weights; CURRENT; releases/log.jsonl
 L6 serve       serve.py -> backends.answer(release): the L5 choice, same reads, same weights
@@ -35,8 +36,8 @@ works at L0 (`label`). To ask "what would win", it uses L3/L4 (`eval`). To go li
    after the live release. It uses the stdlib only, makes no model calls and finishes in under 1 s. The server's
    equivalent is `GET /c/<customer>`.
 2. **Closed vocabularies.** Verdicts: `CREATED IMPORTED VALID LABELLED RELEASED UNCHANGED ROLLED_BACK GATE_REFUSED
-   DATA_INVALID SETUP SERVING`. Backends: `djev gliner tiny`. Candidates: `base base+cal profile profile+cal gliner
-   gliner+cal tiny`. Every command ends with one `verdict=<CLASS> key=value …` line. `status --json` and the
+   DATA_INVALID SETUP SERVING`. Backends: `djev gliner tiny`. Candidates: `base base+cal profile profile+cal` (each also
+   as `@N`, N = `DJEV_READS`, default 3), `gliner gliner+cal tiny`. Every command ends with one `verdict=<CLASS> key=value …` line. `status --json` and the
    release/log records are JSON.
 3. **One verdict per next action.** Exit 0 means proceed. `UNCHANGED` is 0 on purpose: re-running is the right
    move. Exit 2 is `SETUP`: run the command the message names. Exit 7 is `GATE_REFUSED`: add labels or accept the
@@ -65,7 +66,8 @@ works at L0 (`label`). To ask "what would win", it uses L3/L4 (`eval`). To go li
 9. **A tower, not a toolbox.** See above. `backends.py` is the only module that knows a model. `djp.py` knows only
    probabilities. `serve.py` knows only releases.
 10. **The evaluator stays outside the loop.**
-    - The holdout is fixed by hashing the row text, and the bar is plain djev, the model with no customer input.
+    - The holdout is fixed by hashing the row text. The bar is plain djev averaged over 3 reads in shuffled option
+     orders, the model with no customer input, read three times so a single noisy read cannot decide the gate.
     - The gate rule lives in `djp.choose` and is tested.
     - Labels, the gate's ground truth, are **person-only** (`djp.import`, `djp.label` in `tools.json`). An agent
       runs them only on a file the person supplied.
@@ -89,13 +91,13 @@ and tiny are local and free. `--arms gliner,tiny` keeps a release entirely local
 
 ## §1 Release record (`releases/<version>/release.json`)
 
-`customer, version, kind="backends", arms, bar, data_sha, base{image, model}, gliner_model, tiny_model, questions,
-profile, plan{q: {variant, backend, use_profile, calibration, path?}}, tiny{q: {eligible, least_per_option,
+`customer, version, kind="backends", arms, bar, data_sha, djev_reads, base{image, model}, gliner_model, tiny_model, questions,
+profile, plan{q: {variant, backend, use_profile, reads, calibration, path?}}, tiny{q: {eligible, least_per_option,
 train_s?}}, split, eval{candidate: {q: {accuracy, log_loss, ece}}}, released_eval, gate{passed, rule}, seconds`.
 
 ## §2 Open
 
-- djev bar noise: average 2–3 reads per row (Batch B permutation averaging) before trusting gains under ~10 pts.
+- djev bar noise: the bar is now averaged over 3 reads (Batch B). Its measured effect is in results/ (Batch B).
 - Selection among passing candidates is lowest log-loss. On larger holdouts, check whether this ever picks a
   lower-accuracy candidate that customers would notice.
 - Layer 2 (trained djev weights, TRAINING.md) enters as one more candidate behind the same gate.
