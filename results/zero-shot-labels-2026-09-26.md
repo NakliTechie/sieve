@@ -15,12 +15,13 @@ least-confident k % of pool rows get their gold label. Harness: `pipeline/distil
   djev@3 itself. The student inherits the teacher's errors: 19–32 % of the pool labels are wrong.
 - **With a person correcting the least-confident 25 %, the student beats the teacher on all 3 sets.** The gain is
   +7.2 pts on MASSIVE English and +5.4 on Hindi, both more than 3 standard errors. On CLINC it is +1.4, within noise.
-  That recovers 54–64 % of the gap to full human labels on MASSIVE, for a quarter of the labelling.
+  On MASSIVE that closes 55–65 % of the gap between the unreviewed student and full human labels, for a quarter of
+  the labelling.
 - **Correct rows; don't drop them.** Training only on the confident half or quarter gives cleaner labels (5–17 %
   error) but fewer and easier rows, and scores lower on every set. Keeping rows where djev and GLiNER agree fails on
   Hindi, where GLiNER cannot read the text (392 rows kept).
-- **Label noise costs about 7–8 pts per 10 % of random wrong labels for Ettin, less for mmBERT.** The noise series
-  (gold labels with 10–40 % flipped) sets the budget for how wrong a teacher can be.
+- **Label noise is costly.** With 20 % of gold labels flipped at random, mmBERT loses 11–13 pts and Ettin 7–17 pts.
+  The noise series (10–40 % flipped) sets the budget for how wrong a teacher's labels can be.
 - **The margin shrinks with fewer rows per intent.** CLINC's pool had 30 per intent; its human-label ceiling is
   75.3 %, and the reviewed student sits 4.3 pts below it.
 - A 7-set review-budget sweep (0 / 10 / 25 / 50 % least-confident, and a random-25 % control) is running; its
