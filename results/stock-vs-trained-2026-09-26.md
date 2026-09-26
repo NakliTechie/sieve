@@ -115,3 +115,20 @@ Best stock: 69.6 %. A trained model first beats it by more than 2 standard error
 
 Cells: accuracy % / log-loss; training seconds in brackets. "–" means not run: stock arms have no stages,
 calibration stops at 20 (CLINC 10) per option, and mmBERT on civil stops at 20.
+
+## Releases with mmBERT as a candidate (C6, 07:35 IST)
+
+The 3 stand-in customers were re-released with mmBERT-small added to the gate's candidates. The bar is still djev @3,
+and djev reads came from the cache (no GPU service calls). The releases ran one at a time on the Mac's GPU, peaking
+at 2.8 GB. `compare.py` rebuilt every prediction from the saved weights and caches, and matched the gated numbers.
+
+| Question | Holdout n | Chosen | Chosen acc | Bar acc | Sign test p |
+|---|---|---|---|---|---|
+| shop · category | 72 | mmbert | 97.2 % | 70.8 % | 2.1e-05 |
+| moderation · toxic | 76 | mmbert | 77.6 % | 73.7 % | 0.69 |
+| helpdesk (3 questions) | 78 | unchanged; mmBERT won none | | | |
+
+- shop moves from tiny (90.3 %) to mmBERT (97.2 %).
+- moderation · toxic shows the open selection issue. mmBERT has the lowest log-loss (0.418 vs 0.437) but lower
+  accuracy than GLiNER + calibration (77.6 % vs 81.6 %). The gap is 3 rows of 76, within noise. But lowest-log-loss
+  selection has now picked a less accurate model once.
