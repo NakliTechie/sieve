@@ -3,6 +3,8 @@
 
   .venv/bin/python pipeline/distill.py label <bench> --per-opt N    # GPU service: djev@3 reads of the training pool
   .venv/bin/python pipeline/distill.py run <bench> --per-opt N      # local: GLiNER reads, label sets, train, score
+  .venv/bin/python pipeline/distill.py review <bench> --per-opt N --teacher djev@3|gliner|gliner-multi
+                                                                  # review-budget sweep: correct 0/10/25/50 % (+ random 25 %)
   python3 pipeline/distill.py report <bench>
 
 Pool: the first N training rows of each intent (curve.stage_rows; gold labels known, used only for the "gold",
@@ -109,6 +111,55 @@ def cmd_run(name, per_opt):
     print(f"verdict=DONE bench={name} next: python3 pipeline/distill.py report {name}")
 
 
+def cmd_review(name, per_opt, teacher):
+    """Review-budget sweep: the teacher labels the pool; a person corrects k % of rows (the least-confident, or a random
+    k % as the control); mmBERT (and Ettin at 25 %) train on the result. Records go to distill.jsonl with set names
+    review<k>-<least|random>-<teacher>."""
+    import tiny as T
+    d, rows, test, labels = pool(name, per_opt)
+    out = d / "distill.jsonl"
+    done = set()
+    if out.exists():
+        for line in out.read_text().splitlines():
+            try:
+                r = json.loads(line)
+                done.add((r["per_opt"], r["set"], r["model"]))
+            except ValueError:
+                pass
+    texts, gold = [t for t, _ in rows], [l for _, l in rows]
+    with B.gpu_lock():
+        probs = C.zero_shot(teacher, d, labels, texts)
+    top = lambda p: max(p, key=p.get)
+    teach = [top(p) for p in probs]
+    least = sorted(range(len(texts)), key=lambda i: max(probs[i].values()))  # least confident first
+    rnd = list(range(len(texts)))
+    random.Random(0).shuffle(rnd)
+    plan = [(k, "least") for k in (0, 10, 25, 50)] + [(25, "random")]
+    for k, sel in plan:
+        fix = set((least if sel == "least" else rnd)[:int(len(texts) * k / 100)])
+        data = [(texts[i], gold[i] if i in fix else teach[i]) for i in range(len(texts))]
+        err = round(sum(l != g for (_, l), g in zip(data, gold)) / len(data), 4)
+        set_name = f"review{k}-{sel}-{teacher}"
+        for model in ("mmbert", "ettin"):
+            if model == "ettin" and (k, sel) != (25, "least") or (str(per_opt), set_name, model) in done:
+                continue
+            model_id, lr = MODELS[model]
+            epochs = min(30, max(5, -(-300 // max(1, -(-len(data) // 32)))))
+            with B.gpu_lock():
+                m, tok, secs = T.train(data, labels, model_id, epochs, lr, 256 if name == "civil" and model == "ettin" else 64)
+                pr = T.proba(m, tok, [t for t, _ in test], 64)
+                del m, tok
+                C.free()
+            acc, ll = C.scores(pr, test)
+            rec = {"bench": name, "per_opt": str(per_opt), "set": set_name, "model": model, "rows": len(data),
+                   "reviewed": len(fix), "label_error": err, "acc": acc, "ll": ll, "train_s": round(secs, 1),
+                   "teacher": teacher, "at": time.strftime("%Y%m%d-%H%M%S")}
+            with open(out, "a") as f:
+                f.write(json.dumps(rec) + "\n")
+            print("verdict=SCORED " + " ".join(f"{k2}={v}" for k2, v in rec.items() if k2 != "at"), flush=True)
+    print(f"verdict=DONE bench={name} review teacher={teacher}")
+
+
 def cmd_report(name):
     d = P.DATA / "bench" / name
     recs = {}
@@ -139,6 +190,8 @@ def cmd_report(name):
 
 def main(argv):
     opt = {argv[i]: argv[i + 1] for i in range(2, len(argv) - 1, 2)}
+    if len(argv) >= 2 and argv[0] == "review":
+        return cmd_review(argv[1], opt.get("--per-opt", "100"), opt.get("--teacher", "gliner")) or 0
     if len(argv) >= 2 and argv[0] in ("label", "run"):
         per_opt = opt.get("--per-opt", "50")
         return (cmd_label if argv[0] == "label" else cmd_run)(argv[1], per_opt) or 0
