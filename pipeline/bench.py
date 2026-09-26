@@ -33,6 +33,14 @@ RECIPES = {
               "what": "crowdsourced assistant queries, 150 intents + out-of-scope ('oos')"},
     "civil": {"dataset": "google/civil_comments", "license": "CC0-1.0",
               "what": "real news comments; toxic = toxicity >= 0.5; train pool and test balanced 50/50"},
+    "hinglish-top": {"dataset": "WillHeld/hinglish_top", "license": "Apache-2.0 (google-research-datasets/Hinglish-TOP)",
+                     "what": "human-written code-switched Hinglish assistant queries, top-level intent (arXiv 2211.07514)"},
+    "hinglish-top-en": {"dataset": "WillHeld/hinglish_top", "license": "Apache-2.0",
+                        "what": "the same queries' English originals and intents: the English twin of hinglish-top"},
+    "hinglish-yt": {"dataset": "shae2977/hinglish-youtube-sentiments-dataset", "license": "CC-BY-4.0",
+                    "what": "3,190 real Hinglish YouTube comments, hand-labelled sentiment (3 classes)"},
+    "hinglish-retail": {"dataset": "Hari5115/hinglish-retail-intent-dataset", "license": "MIT",
+                        "what": "SYNTHETIC Hinglish e-commerce support messages, intents (messaging-platform-shaped; not real traffic)"},
     "banking77": {"local": True, "license": "CC-BY-4.0 (PolyAI/banking77)", "what": "real bank queries, 77 intents"},
 }
 
@@ -89,6 +97,22 @@ def fetch(name):
         names = label_names(rec["dataset"], "plus", "intent")
         get = lambda split: [(r["text"], names[r["intent"]]) for u in urls[split] for r in parquet(u)]
         write(name, get("train"), get("test"))
+    elif name.startswith("hinglish-top"):
+        import re
+        col = "en_query" if name.endswith("-en") else "cs_query"
+        intent = lambda r: re.match(r"\[IN:(\w+)", r["cs_parse"]).group(1).lower()
+        get = lambda split: [(r[col], intent(r)) for u in urls[split] for r in parquet(u)]
+        train = get("train") + get("validation")  # 2,993 + 1,390: the published train split alone is small
+        keep = {l for l, n in __import__("collections").Counter(l for _, l in train).items() if n >= 5}
+        write(name, [x for x in train if x[1] in keep], [x for x in get("test") if x[1] in keep])
+    elif name == "hinglish-yt":
+        rows = [(r["comment"], r["sentiment"].lower()) for u in urls["train"] for r in parquet(u)]
+        rng = random.Random(0)
+        rng.shuffle(rows)
+        write(name, rows[:len(rows) - 800], rows[len(rows) - 800:])  # single published split: hold out 800
+    elif name == "hinglish-retail":
+        get = lambda split: [(r["text"], r["label"]) for u in urls[split] for r in parquet(u)]
+        write(name, get("train") + get("validation"), get("test"))
     elif name == "civil":
         lab = lambda r: "toxic" if (r["toxicity"] or 0) >= 0.5 else "not_toxic"
         rng = random.Random(0)
