@@ -11,15 +11,17 @@ locally 11:20–13:41 IST. One mmBERT training repeated on the same labels moved
 single cells as ±1.5 pts.
 
 **Read this first.**
-- **Without review, the student never beats its teacher (9 of 9).** It lands 0.9 pt below to 5.5 pts below.
-- **Reviewing the least-confident rows beats reviewing random rows (9 of 9),** by 0.7–6.8 pts at 25 %. The teacher's
-  confidence finds its own mistakes: the same number of reviewed rows removes up to twice the label errors.
+- **Without review, the student does not beat its teacher (9 of 9).** It ties (+0.6 and +0.2, within noise) or
+  trails, by up to 5.5 pts.
+- **Reviewing the least-confident rows beats reviewing random rows,** by more than 2 pts on 7 of 9 datasets (2.5–6.8)
+  and within noise on the other 2 (civil +0.7, Hinglish sentiment +0.5). The teacher's confidence finds its own
+  mistakes: the same number of reviewed rows removes up to twice the label errors.
 - **Reviewing half the rows beats the best zero-shot model on 6 of 9 datasets, by 3.5–17.3 pts.** This includes a
   judgement task (civil comments, +9.4) and Hindi (+10.1). On MASSIVE Hindi and CLINC with djev@3 as teacher, the 50 %
   student matches a student trained on all human labels (75.1 vs 75.1 %, 75.4 vs 75.3 %).
 - **The 3 failures share one cause: a weak teacher.** Each started with 47–51 % wrong labels (GLiNER on MASSIVE English,
   Hinglish-TOP and Hinglish sentiment). Every success started at 19–34 %. After 50 % review the failures still had
-  13–20 % wrong labels; the successes had 3–15 %.
+  13–20 % wrong labels; the successes had 3–15 % (the ranges touch at 13–15 %).
 - **Rule of thumb from this sweep:** use the best available zero-shot model as the teacher; if its labels are about
   two-thirds right or better, reviewing the least-confident half gives a small model that beats zero-shot. For Indian
   languages that teacher has to be djev-class: GLiNER fails on Hindi and collapses on Hinglish.
