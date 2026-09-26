@@ -146,8 +146,10 @@ def cmd_review(name, per_opt, teacher):
             model_id, lr = MODELS[model]
             epochs = min(30, max(5, -(-300 // max(1, -(-len(data) // 32)))))
             with B.gpu_lock():
-                m, tok, secs = T.train(data, labels, model_id, epochs, lr, 256 if name == "civil" and model == "ettin" else 64)
-                pr = T.proba(m, tok, [t for t, _ in test], 64)
+                fixed = model == "mmbert"  # one padded shape on MPS: a banking77 run grew to 12 GB without it
+                m, tok, secs = T.train(data, labels, model_id, epochs, lr, 256 if name == "civil" and model == "ettin" else 64,
+                                       fixed_pad=fixed)
+                pr = T.proba(m, tok, [t for t, _ in test], 64, 64 if fixed else 128, fixed_pad=fixed)
                 del m, tok
                 C.free()
             acc, ll = C.scores(pr, test)
