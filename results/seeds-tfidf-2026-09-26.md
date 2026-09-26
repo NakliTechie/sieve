@@ -16,10 +16,11 @@ Also recorded: "k unused", the number of test intents a model never predicts (a 
 - **On intent routing, the keyword model is the one to beat below 50 labels per intent.** At 20 per intent,
   TF-IDF beats mmBERT on all 6 intent sets, by 3.8–20.7 pts, and Ettin by more. At 50 per intent it ties mmBERT on 3
   sets (within 1 pt), leads on both Hinglish-TOP sets (+10.3, +4.0) and trails on CLINC (−2.1).
-- **With all labels, mmBERT adds 0–4 pts over TF-IDF on 4 intent sets,** and TF-IDF leads on banking77 and
-  Hinglish-TOP. So the gain over zero-shot comes mostly from training on the customer's labels, not from a transformer.
-- **The keyword model passes zero-shot earliest:** at 20 labels per intent on banking77, CLINC and MASSIVE English,
-  and at 50 on Hinglish-TOP, where the transformers needed all the labels.
+- **With all labels, mmBERT adds 1–4 pts over TF-IDF on 4 intent sets** (CLINC, MASSIVE English and Hindi,
+  Hinglish-TOP English). TF-IDF leads on Hinglish-TOP, and on banking77 against Ettin (mmBERT not run there). So the gain over zero-shot comes mostly from training on the customer's labels, not from a transformer.
+- **The keyword model passes zero-shot earliest:** by more than 2 standard errors at 20 labels per intent on banking77
+  and CLINC, and at 50 on MASSIVE English and Hinglish-TOP (at 20 it ties on MASSIVE English, 70.3 vs 69.6). On
+  Hinglish-TOP the transformers needed all the labels.
 - **Judgement tasks are the exception.** On civil comments and Hinglish sentiment the transformers beat TF-IDF, and
   zero-shot beats all of them until the full label pool (civil) or at every stage (Hinglish sentiment).
 - **TF-IDF drops rare intents.** On Hinglish-TOP with all labels, it never predicts 11 of 57 intents (8 of 57 on the
