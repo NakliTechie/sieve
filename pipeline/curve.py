@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stock vs trained at every stage: one fixed test set, label counts 0 / 5 / 10 / 20 / 50 / all per option.
 
-  .venv/bin/python pipeline/curve.py run <bench> [--arms a,b,...] [--stages 5,10,20,50,all] [--cal-max 20]
+  .venv/bin/python pipeline/curve.py run <bench> [--arms a,b,...] [--stages 5,10,20,50,all] [--cal-max 20] [--seed 0]
   python3 pipeline/curve.py report <bench>             # markdown table -> stdout
 
 Bench sets come from pipeline/bench.py (data/bench/<name>/{train,test}.csv). Stage N takes the first N rows of each
@@ -30,7 +30,7 @@ import djcore as P  # noqa: E402
 URL = os.environ.get("DJEV_URL", "http://localhost:8081")
 MODELS = {"gliner": "fastino/GLiNER2.5-Decide", "gliner-multi": "fastino/gliner2.5-multi-v1",
           "tiny": "jhu-clsp/ettin-encoder-17m", "mmbert": "jhu-clsp/mmBERT-small"}
-LOCAL = "gliner,gliner-multi,gliner+cal,gliner-multi+cal,tiny,mmbert"
+LOCAL = "gliner,gliner-multi,gliner+cal,gliner-multi+cal,tfidf,tiny,mmbert"
 STOCK = ("gliner", "gliner-multi", "djev", "djev@3")
 
 
@@ -55,11 +55,12 @@ def load(name):
     return d, read("train.csv"), read("test.csv")
 
 
-def stage_rows(train, stage):
+def stage_rows(train, stage, seed=0):
+    """The first `stage` rows of each label after a seeded shuffle; stages are nested within a seed."""
     by = {}
     for t, l in train:
         by.setdefault(l, []).append((t, l))
-    rng = random.Random(0)
+    rng = random.Random(seed)
     for l in sorted(by):
         rng.shuffle(by[l])
     return [x for l in sorted(by) for x in (by[l] if stage == "all" else by[l][:int(stage)])]
@@ -83,7 +84,29 @@ def zero_shot(arm, d, labels, texts):
     return [p["label"] for p in B.djev_read(URL, qs, None, texts, B.Cache(d / "cache" / "djev.jsonl"), 8, reads)]
 
 
-def run(name, arms, stages, cal_max):
+def tfidf_proba(rows, labels, texts):
+    """TF-IDF (word 1-2 grams + character 2-5 grams) + logistic regression: the keyword baseline. CPU, seconds."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline, make_union
+    vec = make_union(TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True),
+                     TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 5), sublinear_tf=True))
+    clf = make_pipeline(vec, LogisticRegression(max_iter=2000, C=10))
+    t0 = time.time()
+    clf.fit([t for t, _ in rows], [l for _, l in rows])
+    secs = time.time() - t0
+    classes = list(clf.classes_)
+    out = [{l: 0.0 for l in labels} | dict(zip(classes, p)) for p in clf.predict_proba(texts)]
+    return out, secs
+
+
+def never_predicted(probs, test):
+    """Labels present in the test rows that the model never predicts: the collapse check."""
+    picked = {max(p, key=p.get) for p in probs}
+    return len({l for _, l in test} - picked)
+
+
+def run(name, arms, stages, cal_max, seed=0):
     import djp
     d, train, test = load(name)
     labels = sorted({l for _, l in train})
@@ -93,7 +116,7 @@ def run(name, arms, stages, cal_max):
         for line in out.read_text().splitlines():
             try:
                 r = json.loads(line)
-                done.add((r["arm"], str(r["stage"])))
+                done.add((r["arm"], str(r["stage"]), r.get("seed", 0)))
             except ValueError:
                 pass
     texts = [t for t, _ in test]
@@ -107,16 +130,16 @@ def run(name, arms, stages, cal_max):
     for arm in arms:
         base = arm.split("+")[0]
         if arm in STOCK:
-            if (arm, "0") in done:
+            if (arm, "0", 0) in done or seed != 0:  # stock arms have no labels, so no seed
                 continue
             t0 = time.time()
             acc, ll = scores(zero_shot(arm, d, labels, texts), test)
             record({"arm": arm, "stage": 0, "rows": 0, "acc": acc, "ll": ll, "seconds": round(time.time() - t0, 1)})
             continue
         for st in stages:
-            if (arm, str(st)) in done:
+            if (arm, str(st), seed) in done:
                 continue
-            rows = stage_rows(train, st)
+            rows = stage_rows(train, st, seed)
             if arm.endswith("+cal"):
                 if st == "all" or int(st) > cal_max:
                     continue
@@ -126,7 +149,7 @@ def run(name, arms, stages, cal_max):
                 te_p = [P.calibrate(p, bias) for p in zero_shot(base, d, labels, texts)]
                 acc, ll = scores(te_p, test)
                 record({"arm": arm, "stage": st, "rows": len(rows), "acc": acc, "ll": ll,
-                        "seconds": round(time.time() - t0, 1)})
+                        "seconds": round(time.time() - t0, 1), "seed": seed})
             elif arm in ("tiny", "mmbert"):
                 import tiny as T
                 steps_per_epoch = max(1, -(-len(rows) // 32))
@@ -134,18 +157,26 @@ def run(name, arms, stages, cal_max):
                 lr = 1e-4 if arm == "tiny" else 5e-5
                 fixed = arm == "mmbert"
                 with B.gpu_lock():  # one model on the GPU per machine (backends.gpu_lock)
-                    model, tok, secs = T.train(rows, labels, MODELS[arm], epochs, lr, maxlen, fixed_pad=fixed)
-                    acc, ll = scores(T.proba(model, tok, texts, maxlen, 64 if fixed else 128, fixed_pad=fixed), test)
+                    model, tok, secs = T.train(rows, labels, MODELS[arm], epochs, lr, maxlen, seed=seed, fixed_pad=fixed)
+                    probs = T.proba(model, tok, texts, maxlen, 64 if fixed else 128, fixed_pad=fixed)
                     del model, tok
                     free()
+                acc, ll = scores(probs, test)
                 record({"arm": arm, "stage": st, "rows": len(rows), "acc": acc, "ll": ll, "seconds": round(secs, 1),
-                        "epochs": epochs})
+                        "epochs": epochs, "seed": seed, "never_predicted": never_predicted(probs, test)})
+            elif arm == "tfidf":
+                probs, secs = tfidf_proba(rows, labels, texts)
+                acc, ll = scores(probs, test)
+                record({"arm": arm, "stage": st, "rows": len(rows), "acc": acc, "ll": ll, "seconds": round(secs, 1),
+                        "seed": seed, "never_predicted": never_predicted(probs, test)})
             else:
                 raise SystemExit(f"verdict=SETUP unknown arm '{arm}'; arms: {LOCAL},djev,djev@3,djev+cal")
     print(f"verdict=DONE bench={name} next: python3 pipeline/curve.py report {name}")
 
 
 def report(name):
+    """Markdown table; cells with several seeds show mean ± standard deviation across seeds (n in the header)."""
+    import statistics
     d = P.DATA / "bench" / name
     recs = {}
     for line in (d / "curve.jsonl").read_text().splitlines():
@@ -153,33 +184,47 @@ def report(name):
             r = json.loads(line)
         except ValueError:
             continue
-        recs[(r["arm"], str(r["stage"]))] = r
-    n = next(iter(recs.values()))["test"]
+        recs.setdefault((r["arm"], str(r["stage"])), {})[r.get("seed", 0)] = r  # a re-run of a seed replaces it
+    n = next(iter(next(iter(recs.values())).values()))["test"]
     stages = ["0"] + [s for s in ("5", "10", "20", "50", "all") if any(k[1] == s for k in recs)]
-    order = ["gliner", "gliner-multi", "djev", "djev@3", "gliner+cal", "gliner-multi+cal", "djev+cal", "tiny", "mmbert"]
+    order = ["gliner", "gliner-multi", "djev", "djev@3", "gliner+cal", "gliner-multi+cal", "djev+cal", "tfidf", "tiny",
+             "mmbert"]
     arms = [a for a in order if any(k[0] == a for k in recs)]
-    rows_at = {s: next((r["rows"] for (a, st), r in recs.items() if st == s and r["rows"]), 0) for s in stages}
+    rows_at = {s: next((r["rows"] for (a, st), v in recs.items() for r in v.values() if st == s and r["rows"]), 0)
+               for s in stages}
+    mean = lambda v: statistics.mean(r["acc"] for r in v.values())
+    seeds = max(len(v) for v in recs.values())
     print(f"Test rows: {n} (the same rows for every cell; one standard error is about "
-          f"{100 * math.sqrt(0.25 / n):.1f} pts at 50 %). Cells: accuracy % / log-loss; train seconds in brackets for "
-          f"trained arms. Stage = labelled rows per option (0 = stock, no labels).\n")
+          f"{100 * math.sqrt(0.25 / n):.1f} pts at 50 %). Cells: accuracy %"
+          + (f", mean ± standard deviation over up to {seeds} seeds (each seed draws different labelled rows and "
+             f"starts training differently)" if seeds > 1 else "") +
+          "; train seconds in brackets; 'k unused' = k test intents the model never predicts. "
+          "Stage = labelled rows per option (0 = stock, no labels).\n")
     print("| Arm | " + " | ".join(f"{s}/opt ({rows_at[s]} rows)" if s != "0" else "stock" for s in stages) + " |")
     print("|---" * (len(stages) + 1) + "|")
     for a in arms:
         cells = []
         for s in stages:
-            r = recs.get((a, s))
-            if not r:
+            v = recs.get((a, s))
+            if not v:
                 cells.append("–")
                 continue
-            extra = f" [{r['seconds']:.0f} s]" if a in ("tiny", "mmbert") else ""
-            cells.append(f"{100 * r['acc']:.1f} / {r['ll']:.2f}{extra}")
+            accs = [100 * r["acc"] for r in v.values()]
+            cell = f"{statistics.mean(accs):.1f}" + (f" ± {statistics.stdev(accs):.1f}" if len(accs) > 1 else "")
+            if a in ("tiny", "mmbert", "tfidf"):
+                cell += f" [{statistics.mean(r['seconds'] for r in v.values()):.0f} s]"
+            unused = max(r.get("never_predicted", 0) for r in v.values())
+            if unused:
+                cell += f" ({unused} unused)"
+            cells.append(cell)
         print(f"| {a} | " + " | ".join(cells) + " |")
-    best_stock = max((r["acc"] for (a, s), r in recs.items() if a in STOCK), default=None)
-    if best_stock is not None:
-        se = math.sqrt(best_stock * (1 - best_stock) / n)
-        cross = next((s for s in stages[1:] if any(recs.get((a, s), {}).get("acc", 0) > best_stock + 2 * se
-                                                    for a in ("tiny", "mmbert"))), None)
-        print(f"\nBest stock: {100 * best_stock:.1f} %. A trained model first beats it by more than 2 standard errors at: "
+    stock = [mean(v) for (a, s), v in recs.items() if a in STOCK]
+    if stock:
+        best = max(stock)
+        se = math.sqrt(best * (1 - best) / n)
+        cross = next((s for s in stages[1:] if any(a in ("tiny", "mmbert", "tfidf") and (a, s) in recs
+                                                   and mean(recs[(a, s)]) > best + 2 * se for a in arms)), None)
+        print(f"\nBest stock: {100 * best:.1f} %. A trained model first beats it by more than 2 standard errors at: "
               f"{cross + ' labels per option' if cross else 'no stage measured'}.")
 
 
@@ -188,7 +233,7 @@ def main(argv):
         opt = {argv[i]: argv[i + 1] for i in range(2, len(argv) - 1, 2)}
         arms = opt.get("--arms", LOCAL).split(",")
         stages = opt.get("--stages", "5,10,20,50,all").split(",")
-        return run(argv[1], arms, stages, int(opt.get("--cal-max", 20))) or 0
+        return run(argv[1], arms, stages, int(opt.get("--cal-max", 20)), int(opt.get("--seed", 0))) or 0
     if len(argv) >= 2 and argv[0] == "report":
         return report(argv[1]) or 0
     print(__doc__)
