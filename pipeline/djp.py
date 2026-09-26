@@ -520,8 +520,8 @@ def main(argv):
     except urllib.error.HTTPError as e:
         die(2, f"{URL} answered HTTP {e.code}: {e.read()[:200]!r}. Logs: gcloud run services logs read djev --region us-central1 --limit 50")
     except OSError as e:
-        die(2, f"cannot reach {URL} ({e}). Start: gcloud run services proxy djev --region us-central1 --project djev-ouz56i "
-               f"--port 8081 (reads done so far are cached; re-run the same command), or pass --arms gliner,tiny")
+        die(2, f"cannot reach {URL} ({e}). Start a /v1/systemone server there (for Cloud Run: gcloud run services proxy <service> --port 8081) "
+               f"(reads done so far are cached; re-run the same command), or pass --arms gliner,tiny,mmbert")
     return 0
 
 

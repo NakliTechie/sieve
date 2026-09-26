@@ -65,7 +65,7 @@ def call(cid, body):
         return 502, {"error": {"message": f"djev answered HTTP {x.code}"}}
     except urllib.error.URLError as x:
         return err(502, f"a question is on djev and {URL} is unreachable ({x.reason}). Start: gcloud run services proxy "
-                        "djev --region us-central1 --project djev-ouz56i --port 8081")
+                        "<service> --port 8081 (for a Cloud Run deployment)")
 
 
 class Handler(BaseHTTPRequestHandler):
