@@ -36,7 +36,7 @@ class FakeTiny:
         (Path(path) / "model.safetensors").write_text("fake")
 
 
-def fake_tiny_proba(model, tok, states):
+def fake_tiny_proba(model, tok, states, arm="tiny"):
     out = []
     for s in states:
         hit = "red" if "red" in s else "blue"
@@ -61,7 +61,7 @@ class Pipeline(unittest.TestCase):
         (self.d / "data.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows(120)))
         self._saved = (B.gliner_read, B.tiny_fit, B.tiny_proba, B._tiny, os.replace)
         B.gliner_read = fake_gliner_read
-        B.tiny_fit = lambda q, spec, train: (None, None, 0.1)
+        B.tiny_fit = lambda q, spec, train, arm="tiny": (None, None, 0.1)
         B.tiny_proba = fake_tiny_proba
         B._tiny = lambda: FakeTiny
         FakeTiny.wrong = False
@@ -152,6 +152,13 @@ class Pipeline(unittest.TestCase):
         self.assertNotEqual(self.current(), first)
         self.assertEqual(self.release("rollback", "acme"), 0)
         self.assertEqual(self.current(), first)
+
+    def test_mmbert_arm_saved_under_its_own_path(self):
+        self.assertEqual(self.release("release", "acme", "--arms", "gliner,mmbert"), 0)
+        rel = json.loads((self.d / "releases" / self.current() / "release.json").read_text())
+        spec = rel["plan"]["color"]
+        self.assertEqual((spec["backend"], spec["path"].split("/")[0]), ("mmbert", "mmbert"))
+        self.assertTrue((self.d / "releases" / self.current() / spec["path"] / "model.safetensors").exists())
 
     def test_tiny_needs_twenty_per_option(self):
         few = rows(30)

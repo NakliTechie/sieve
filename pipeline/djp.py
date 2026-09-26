@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""djp: onboard a customer, then build, gate and release their own classifier, per question on djev, GLiNER or tiny.
+"""djp: onboard a customer, then build, gate and release their own classifier, per question on djev, GLiNER, tiny or mmBERT.
 
   python3 pipeline/djp.py status [--json]                      # the whole picture: one line per customer
   python3 pipeline/djp.py init <customer>                      # create $DJP_HOME/<customer>/customer.json to edit
   python3 pipeline/djp.py import <customer> <file.csv|.jsonl> --state <col> --label <col>[,<col>...]
                                                                # their data, their column names -> data.jsonl (replaces)
   python3 pipeline/djp.py check <customer>                     # validate data + questions; no model calls
-  .venv/bin/python pipeline/djp.py eval <customer> [--arms djev,gliner,tiny]
+  .venv/bin/python pipeline/djp.py eval <customer> [--arms djev,gliner,tiny,mmbert]
                                                                # every candidate on the holdout; writes no release
-  .venv/bin/python pipeline/djp.py release <customer> [--arms djev,gliner,tiny] [--force]
+  .venv/bin/python pipeline/djp.py release <customer> [--arms djev,gliner,tiny,mmbert] [--force]
                                                                # candidates -> per-question gate -> release -> CURRENT
   .venv/bin/python pipeline/djp.py label <customer> <file.csv|.jsonl> [--state state] [--label <cols>] [--arms ...]
                                                                # append new labelled rows, retrain, gate, release
 
 Arms (backends.py): djev (zero-shot on the GPU service; + calibration, + the customer's rules and examples),
 gliner (GLiNER2.5-Decide, zero-shot, local; + calibration), tiny (Ettin-17M fine-tuned on the training rows, local;
-only for questions with >= 20 labelled rows per option). The bar is plain djev (or plain gliner when djev is not in
+only for questions with >= 20 labelled rows per option), mmbert (mmBERT-small, multilingual, the same way). The bar is plain djev (or plain gliner when djev is not in
 --arms). Per question, a candidate replaces the bar only if its holdout accuracy >= the bar's and its log-loss is
 lower; among those the lowest log-loss wins. The winning candidate is what gets served (serve.py): tiny weights are
 saved in the release. `release` is skipped (UNCHANGED) when the live release was built from the same data and arms.
@@ -248,7 +248,7 @@ def load_valid(cid):
 
 def candidate(name):
     """-> (backend, served with the profile in front, djev reads averaged). base@N / gliner are also the bars.
-    Names: base, profile (+cal), their @N forms (N reads over shuffled option orders), gliner(+cal), tiny."""
+    Names: base, profile (+cal), their @N forms (N reads over shuffled option orders), gliner(+cal), tiny, mmbert."""
     head = name.split("+")[0]
     if head.startswith(("base", "profile")):
         return "djev", head.startswith("profile"), int(head.split("@")[1]) if "@" in head else 1
@@ -291,20 +291,21 @@ def evaluate(cid, arms):
         g_hold = B.gliner_read(qs, states(hold), c)
         cands["gliner"] = ({}, g_hold, list(qs))
         cands["gliner+cal"] = (fit(B.gliner_read(qs, states(train), c), train), g_hold, list(qs))
-    if "tiny" in arms:
-        t_hold = [{} for _ in hold]
+    for arm in [a for a in B.TRAINED if a in arms]:
+        t_hold, done = [{} for _ in hold], []
         for q, spec in qs.items():
             ok, least = B.tiny_eligible(spec, q, rows)
-            tiny[q] = {"eligible": ok, "least_per_option": least, "min_per_option": B.TINY_MIN_PER_OPTION}
+            tiny.setdefault(q, {"eligible": ok, "least_per_option": least, "min_per_option": B.TINY_MIN_PER_OPTION})
             if not ok:
                 continue
-            m, tok, secs = B.tiny_fit(q, spec, train)
-            for d, p in zip(t_hold, B.tiny_proba(m, tok, states(hold))):
+            m, tok, secs = B.tiny_fit(q, spec, train, arm)
+            for d, p in zip(t_hold, B.tiny_proba(m, tok, states(hold), arm)):
                 d[q] = p
-            tiny[q]["train_s"] = round(secs, 1)
-            models[q] = (m, tok)
-        if models:
-            cands["tiny"] = ({}, t_hold, list(models))
+            tiny[q][f"{arm}_train_s"] = round(secs, 1)
+            models[(arm, q)] = (B.park(m), tok)  # kept on CPU until saved: MPS memory is freed per question
+            done.append(q)
+        if done:
+            cands[arm] = ({}, t_hold, done)
     bar = (f"base@{n}" if n > 1 else "base") if "djev" in arms else "gliner" if "gliner" in arms else None
     if bar is None:
         die(2, f"--arms {','.join(arms)} has no zero-shot bar; include djev (bar: plain djev) or gliner (bar: plain gliner)")
@@ -375,12 +376,12 @@ def cmd_release(cid, arms, force=False):
         backend, use_profile, reads = candidate(plan[q])
         rplan[q] = {"variant": plan[q], "backend": backend, "use_profile": use_profile, "reads": reads,
                     "calibration": cands[plan[q]][0].get(q, {})}
-        if backend == "tiny":
-            rplan[q]["path"] = B.tiny_dirname(q)
+        if backend in B.TRAINED:
+            rplan[q]["path"] = B.tiny_dirname(q, backend)
     release = {"customer": cid, "version": version, "kind": "backends", "arms": list(arms), "bar": bar, "data_sha": sha,
                "djev_reads": B.DJEV_READS,
                "base": {"image": IMAGE, "model": B.DJEV_MODEL}, "gliner_model": B.GLINER_MODEL,
-               "tiny_model": B.TINY_MODEL, "questions": qs, "profile": e["profile"], "plan": rplan, "tiny": e["tiny"],
+               "trained_models": {a: m for a, (m, _, _) in B.TRAINED.items()}, "questions": qs, "profile": e["profile"], "plan": rplan, "tiny": e["tiny"],
                "split": {"train": len(e["train"]), "few_shot": len(e["profile"]["examples"]),
                          "calibration_rows": len(e["fit_rows"]), "holdout": len(hold)},
                "eval": ev, "released_eval": {**per_q, "_mean": mean},
@@ -394,8 +395,8 @@ def cmd_release(cid, arms, force=False):
     tmp = rel / f".tmp-{version}"
     if passed:
         for q, spec in rplan.items():
-            if spec["backend"] == "tiny":
-                B._tiny().save(*e["models"][q], str(tmp / spec["path"]))
+            if spec["backend"] in B.TRAINED:
+                B._tiny().save(*e["models"][(spec["backend"], q)], str(tmp / spec["path"]))
     P.write_atomic(tmp / "release.json", json.dumps(release, indent=1))
     os.replace(tmp, rel / version)
     b = ev[bar]["_mean"]

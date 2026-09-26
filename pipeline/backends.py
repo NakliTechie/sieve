@@ -4,6 +4,8 @@
   gliner  GLiNER2.5-Decide on this machine; zero-shot. Deterministic.
   tiny    Ettin-17M fine-tuned per question on the customer's training rows; saved inside the release and served
           from there on CPU or MPS (no GPU service).
+  mmbert  mmBERT-small (140M, multilingual) fine-tuned and served the same way; +7-12 pts over tiny on Hindi
+          (results/stock-vs-trained-2026-09-26.md). 128 tokens: at 256 it grew past 11 GB on MPS.
 
 The release pipeline (djp.py) and the server (serve.py) both call this module, so what the gate evaluated is what is
 served: djev and gliner are the same calls, tiny is the same saved weights.
@@ -29,11 +31,12 @@ import djcore as P  # noqa: E402
 
 DJEV_MODEL = "nvidia/diffusiongemma-26B-A4B-it-NVFP4@ec4ff3df205028f4e81c954c2227f9312b3ec2ea"
 GLINER_MODEL = os.environ.get("GLINER_MODEL", "fastino/GLiNER2.5-Decide")
-TINY_MODEL = "jhu-clsp/ettin-encoder-17m"
 TINY_MIN_PER_OPTION = 20  # labelled rows per option (all rows, not only training) before tiny is a candidate
-TINY_EPOCHS, TINY_LR, TINY_MAX_LEN = 10, 1e-4, 256
+TINY_EPOCHS = 10  # both trained arms
 DJEV_READS = int(os.environ.get("DJEV_READS", "3"))  # reads averaged over option orders for the bar and the @N candidates
-ARMS = ("djev", "gliner", "tiny")
+ARMS = ("djev", "gliner", "tiny", "mmbert")
+# trained arms: model, learning rate, max tokens
+TRAINED = {"tiny": ("jhu-clsp/ettin-encoder-17m", 1e-4, 256), "mmbert": ("jhu-clsp/mmBERT-small", 5e-5, 128)}
 
 
 class NeedsVenv(RuntimeError):
@@ -199,19 +202,34 @@ def tiny_eligible(question_spec, q, rows):
     return least >= TINY_MIN_PER_OPTION, least
 
 
-def tiny_fit(q, spec, train):
+def tiny_fit(q, spec, train, arm="tiny"):
     """Fine-tune on the training rows for one question. -> (model, tokenizer, seconds)."""
     T = _tiny()
-    return T.train([(r["state"], r["answers"][q]) for r in train], list(spec["criteria"]), TINY_MODEL,
-                   TINY_EPOCHS, TINY_LR, TINY_MAX_LEN)
+    model_id, lr, max_len = TRAINED[arm]
+    return T.train([(r["state"], r["answers"][q]) for r in train], list(spec["criteria"]), model_id,
+                   TINY_EPOCHS, lr, max_len)
 
 
-def tiny_proba(model, tok, states):
-    return _tiny().proba(model, tok, states, TINY_MAX_LEN)
+def park(model):
+    """Move a trained model to CPU and return the accelerator's cache (a release trains up to 2 x questions models;
+    held on MPS they reached 13 GB on helpdesk)."""
+    if not hasattr(model, "to"):  # a stand-in model (tests)
+        return model
+    import gc
+    import torch
+    model = model.to("cpu")
+    gc.collect()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    return model
 
 
-def tiny_dirname(q):
-    return "tiny/" + (re.sub(r"[^A-Za-z0-9_-]", "_", q) or "q") + "-" + hashlib.sha1(q.encode()).hexdigest()[:6]
+def tiny_proba(model, tok, states, arm="tiny"):
+    return _tiny().proba(model, tok, states, TRAINED[arm][2], 32 if arm == "mmbert" else 128)
+
+
+def tiny_dirname(q, arm="tiny"):
+    return f"{arm}/" + (re.sub(r"[^A-Za-z0-9_-]", "_", q) or "q") + "-" + hashlib.sha1(q.encode()).hexdigest()[:6]
 
 
 _tiny_loaded, _tiny_lock = {}, threading.Lock()
@@ -248,10 +266,10 @@ def answer(url, release, state):
             if backend == "gliner":
                 raw.update(gliner_read(group, [state])[0])
                 calls += 1
-            elif backend == "tiny":
+            elif backend in TRAINED:
                 for q in group:
                     m, tok = _tiny_model(str(rdir / plan[q]["path"]))
-                    raw[q] = tiny_proba(m, tok, [state])[0]
+                    raw[q] = tiny_proba(m, tok, [state], backend)[0]
                     calls += 1
         per_group = {}
         for (key, group, i), f in futs:
@@ -267,6 +285,6 @@ def answer(url, release, state):
         best = max(p, key=p.get)
         out[q] = {"choice": best, "probabilities": {k: round(v, 6) for k, v in p.items()},
                   "confidence": round(p[best], 6), "backend": plan[q]["backend"]}
-    models = {"djev": model or DJEV_MODEL, "gliner": GLINER_MODEL, "tiny": TINY_MODEL}
+    models = {"djev": model or DJEV_MODEL, "gliner": GLINER_MODEL, **{a: m for a, (m, _, _) in TRAINED.items()}}
     return {"model": {b: models[b] for b in sorted({s["backend"] for s in plan.values()})}, "customer": release["customer"], "release": release["version"], "answers": out,
             "diagnostics": {"timing": {"total_ms": round((time.time() - t0) * 1000, 1)}, "calls": calls}}

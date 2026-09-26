@@ -18,7 +18,11 @@ import random
 import sys
 import time
 
-import torch
+# Cap PyTorch's share of GPU memory on Apple silicon: past the cap it raises an error instead of pushing the GPU
+# driver, which panicked the kernel (IOGPUGroupMemory) on 2026-09-26 while mmBERT trained beside another GPU job.
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.5")
+
+import torch  # noqa: E402
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

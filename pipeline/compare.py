@@ -52,9 +52,9 @@ def rows_for(release, hold):
     rdir = P.customer_dir(cid) / "releases" / release["version"]
     bar = djp.candidate(release.get("bar", "base"))
     for q, p in plan.items():
-        if p["backend"] == "tiny":
+        if p["backend"] in B.TRAINED:
             m, tok = B._tiny_model(str(rdir / p["path"]))
-            raw = [{q: x} for x in B.tiny_proba(m, tok, states)]
+            raw = [{q: x} for x in B.tiny_proba(m, tok, states, p["backend"])]
         else:
             raw = read(p["backend"], p["use_profile"], p.get("reads", 1))
         pick = lambda pr, cal: max((c := P.calibrate(pr[q], cal)), key=c.get)
@@ -118,10 +118,10 @@ def main(argv):
             assert abs(acc - r["released_eval"][q]["accuracy"]) < 1e-3, (cid, q, acc, r["released_eval"][q]["accuracy"])
             rr = reread.get(f"{cid}:{q}", {}).get("reread") if r.get("bar") == "base" else \
                 reread.get(f"{cid}:{q}", {}).get(f"reread@{r.get('djev_reads', 1)}")
-            cands = [f"{100 * r['eval'][n][q]['accuracy']:.1f}" if q in r["eval"].get(n, {}) else "–" for n in cand_names]
             tiny = r.get("tiny", {}).get(q, {})
-            if tiny and not tiny.get("eligible"):
-                cands[-1] = f"– ({tiny['least_per_option']}/opt)"
+            cands = [f"{100 * r['eval'][n][q]['accuracy']:.1f}" if q in r["eval"].get(n, {})
+                     else f"– ({tiny['least_per_option']}/opt)" if n in B.TRAINED and tiny and not tiny.get("eligible")
+                     else "–" for n in cand_names]
             print(f"| {cid} · {q} | {len(hold)} | {len(r['questions'][q]['criteria'])} | {p['backend']} ({p['variant']}) "
                   f"| {100 * acc:.1f} | {100 * bar_acc:.1f} | {f'{100 * rr:.1f}' if rr is not None else '–'} "
                   f"| {round(100 * (acc - bar_acc), 1) + 0.0:+.1f} | {b} / {c} | {sign_p(b, c):.3g} | " + " | ".join(cands) + " |")
