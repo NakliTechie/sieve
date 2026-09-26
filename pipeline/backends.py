@@ -16,6 +16,7 @@ answers vary between calls; the cache freezes one read per row, so the gate is r
 
 gliner and tiny need torch + transformers + gliner2 (the .venv); they are imported only when used.
 """
+import contextlib
 import hashlib
 import json
 import os
@@ -202,18 +203,24 @@ def tiny_eligible(question_spec, q, rows):
     return least >= TINY_MIN_PER_OPTION, least
 
 
-def tiny_fit(q, spec, train, arm="tiny"):
-    """Fine-tune on the training rows for one question. -> (model, tokenizer, seconds).
-    One training at a time per machine (a lock in $SIEVE_DATA): two mmBERT runs overlapping on one Mac's GPU
-    (17.7 GB together) panicked the kernel on 2026-09-26."""
+@contextlib.contextmanager
+def gpu_lock():
+    """One model on the accelerator per machine: an exclusive flock on $SIEVE_DATA/.train.lock held across
+    train -> score -> park. Two mmBERT runs overlapping on one Mac's GPU (17.7 GB together) panicked the
+    kernel on 2026-09-26. Not re-entrant: take it once, around the whole unit of GPU work."""
     import fcntl
+    P.DATA.mkdir(parents=True, exist_ok=True)
+    with open(P.DATA / ".train.lock", "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def tiny_fit(q, spec, train, arm="tiny"):
+    """Fine-tune on the training rows for one question. -> (model, tokenizer, seconds). Call inside gpu_lock()."""
     T = _tiny()
     model_id, lr, max_len = TRAINED[arm]
-    P.DATA.mkdir(parents=True, exist_ok=True)
-    with open(P.DATA / ".train.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        return T.train([(r["state"], r["answers"][q]) for r in train], list(spec["criteria"]), model_id,
-                       TINY_EPOCHS, lr, max_len)
+    return T.train([(r["state"], r["answers"][q]) for r in train], list(spec["criteria"]), model_id,
+                   TINY_EPOCHS, lr, max_len)
 
 
 def park(model):

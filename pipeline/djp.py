@@ -298,11 +298,12 @@ def evaluate(cid, arms):
             tiny.setdefault(q, {"eligible": ok, "least_per_option": least, "min_per_option": B.TINY_MIN_PER_OPTION})
             if not ok:
                 continue
-            m, tok, secs = B.tiny_fit(q, spec, train, arm)
-            for d, p in zip(t_hold, B.tiny_proba(m, tok, states(hold), arm)):
-                d[q] = p
+            with B.gpu_lock():  # train -> score -> park: one model on the GPU per machine
+                m, tok, secs = B.tiny_fit(q, spec, train, arm)
+                for d, p in zip(t_hold, B.tiny_proba(m, tok, states(hold), arm)):
+                    d[q] = p
+                models[(arm, q)] = (B.park(m), tok)  # kept on CPU until saved
             tiny[q][f"{arm}_train_s"] = round(secs, 1)
-            models[(arm, q)] = (B.park(m), tok)  # kept on CPU until saved: MPS memory is freed per question
             done.append(q)
         if done:
             cands[arm] = ({}, t_hold, done)

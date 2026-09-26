@@ -133,15 +133,13 @@ def run(name, arms, stages, cal_max):
                 epochs = min(30, max(5, -(-300 // steps_per_epoch)))
                 lr = 1e-4 if arm == "tiny" else 5e-5
                 fixed = arm == "mmbert"
-                import fcntl
-                with open(P.DATA / ".train.lock", "w") as lock:  # one training per machine (see backends.tiny_fit)
-                    fcntl.flock(lock, fcntl.LOCK_EX)
+                with B.gpu_lock():  # one model on the GPU per machine (backends.gpu_lock)
                     model, tok, secs = T.train(rows, labels, MODELS[arm], epochs, lr, maxlen, fixed_pad=fixed)
-                acc, ll = scores(T.proba(model, tok, texts, maxlen, 64 if fixed else 128, fixed_pad=fixed), test)
+                    acc, ll = scores(T.proba(model, tok, texts, maxlen, 64 if fixed else 128, fixed_pad=fixed), test)
+                    del model, tok
+                    free()
                 record({"arm": arm, "stage": st, "rows": len(rows), "acc": acc, "ll": ll, "seconds": round(secs, 1),
                         "epochs": epochs})
-                del model, tok
-                free()
             else:
                 raise SystemExit(f"verdict=SETUP unknown arm '{arm}'; arms: {LOCAL},djev,djev@3,djev+cal")
     print(f"verdict=DONE bench={name} next: python3 pipeline/curve.py report {name}")
