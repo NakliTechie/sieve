@@ -203,11 +203,17 @@ def tiny_eligible(question_spec, q, rows):
 
 
 def tiny_fit(q, spec, train, arm="tiny"):
-    """Fine-tune on the training rows for one question. -> (model, tokenizer, seconds)."""
+    """Fine-tune on the training rows for one question. -> (model, tokenizer, seconds).
+    One training at a time per machine (a lock in $SIEVE_DATA): two mmBERT runs overlapping on one Mac's GPU
+    (17.7 GB together) panicked the kernel on 2026-09-26."""
+    import fcntl
     T = _tiny()
     model_id, lr, max_len = TRAINED[arm]
-    return T.train([(r["state"], r["answers"][q]) for r in train], list(spec["criteria"]), model_id,
-                   TINY_EPOCHS, lr, max_len)
+    P.DATA.mkdir(parents=True, exist_ok=True)
+    with open(P.DATA / ".train.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return T.train([(r["state"], r["answers"][q]) for r in train], list(spec["criteria"]), model_id,
+                       TINY_EPOCHS, lr, max_len)
 
 
 def park(model):

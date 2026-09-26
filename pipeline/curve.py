@@ -133,7 +133,10 @@ def run(name, arms, stages, cal_max):
                 epochs = min(30, max(5, -(-300 // steps_per_epoch)))
                 lr = 1e-4 if arm == "tiny" else 5e-5
                 fixed = arm == "mmbert"
-                model, tok, secs = T.train(rows, labels, MODELS[arm], epochs, lr, maxlen, fixed_pad=fixed)
+                import fcntl
+                with open(P.DATA / ".train.lock", "w") as lock:  # one training per machine (see backends.tiny_fit)
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    model, tok, secs = T.train(rows, labels, MODELS[arm], epochs, lr, maxlen, fixed_pad=fixed)
                 acc, ll = scores(T.proba(model, tok, texts, maxlen, 64 if fixed else 128, fixed_pad=fixed), test)
                 record({"arm": arm, "stage": st, "rows": len(rows), "acc": acc, "ll": ll, "seconds": round(secs, 1),
                         "epochs": epochs})
