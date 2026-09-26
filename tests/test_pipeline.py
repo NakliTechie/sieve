@@ -163,6 +163,59 @@ class Pipeline(unittest.TestCase):
         self.assertEqual((spec["backend"], spec["path"].split("/")[0]), ("mmbert", "mmbert"))
         self.assertTrue((self.d / "releases" / self.current() / spec["path"] / "model.safetensors").exists())
 
+    def test_split_keeps_model_labels_out_of_scoring(self):
+        rows_ = rows(200) + [dict(r, source="teacher") for r in rows(200, start=1000)]
+        train, select, test = djp.P.split(rows_)
+        self.assertTrue(all(r.get("source") != "teacher" for r in select + test))
+        self.assertEqual(sum(r.get("source") == "teacher" for r in train), 200)
+        self.assertTrue(select and test)
+        self.assertEqual(len(train) + len(select) + len(test), 400)
+
+    def test_tfidf_candidate_released_and_served(self):
+        self.assertEqual(self.release("release", "acme", "--arms", "gliner,tfidf"), 0)
+        rel = json.loads((self.d / "releases" / self.current() / "release.json").read_text())
+        spec = rel["plan"]["color"]
+        self.assertEqual(spec["backend"], "tfidf")
+        self.assertTrue((self.d / "releases" / self.current() / spec["path"] / "model.joblib").exists())
+        self.assertIn("released", rel["test_eval"])
+        self.assertGreater(rel["test_eval"]["n"], 0)
+        served = B.answer("x", rel, "ticket 9999: the item is blue")
+        self.assertEqual(served["answers"]["color"]["backend"], "tfidf")
+        self.assertEqual(served["answers"]["color"]["choice"], "blue")
+
+    def test_gate_refuses_a_candidate_that_drops_options(self):
+        ev = {"base": {"a": {"accuracy": 0.6, "log_loss": 1.0, "unused": 0}},
+              "tfidf": {"a": {"accuracy": 0.9, "log_loss": 0.3, "unused": 2}},
+              "tiny": {"a": {"accuracy": 0.7, "log_loss": 0.5, "unused": 0}}}
+        self.assertEqual(djp.choose(["a"], ev, "base"), {"a": "tiny"})
+
+    def test_review_then_label_reviewed(self):
+        unl = TMP / "unlabelled.csv"
+        texts = [f"message {i}: the item is {OPTIONS[i % 2]}" for i in range(300, 400)]
+        unl.write_text("state\n" + "\n".join(texts) + "\n")
+        out = TMP / "review.csv"
+        self.assertEqual(self.release("review", "acme", str(unl), "--teacher", "gliner", "--out", str(out)), 0)
+        import csv as _csv
+        got = list(_csv.DictReader(open(out)))
+        self.assertEqual(len(got), 100)
+        held = [r for r in got if djp.P.heldout(r["state"])]
+        self.assertTrue(held and all(r["review"] == "yes" for r in held), "every held-out row must be checked")
+        rest = [r for r in got if not djp.P.heldout(r["state"])]
+        self.assertEqual(sum(r["review"] == "yes" for r in rest), len(rest) // 2)
+        for r in got:  # the person corrects the rows they were asked to check
+            if r["review"] == "yes":
+                r["color"] = r["state"].split()[-1]
+        with open(out, "w", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=list(got[0]))
+            w.writeheader()
+            w.writerows(got)
+        self.assertEqual(self.release("label", "acme", str(out), "--reviewed", "--arms", "gliner,tfidf"), 0)
+        data = [json.loads(l) for l in (self.d / "data.jsonl").read_text().splitlines()]
+        teacher = [r for r in data if r.get("source") == "teacher"]
+        self.assertEqual(len(teacher), len(rest) - len(rest) // 2)
+        _, select, test = djp.P.split(data)
+        self.assertFalse([r for r in select + test if r.get("source") == "teacher"])
+
     def test_tiny_needs_twenty_per_option(self):
         few = rows(30)
         ok, least = B.tiny_eligible({"criteria": OPTIONS}, "color", few)

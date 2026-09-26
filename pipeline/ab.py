@@ -48,7 +48,7 @@ def suite(limit=None):
         customer, rows = P.load_customer(d.name)
         if not rows:
             continue
-        _, hold = P.split(rows)
+        _, hold, _ = P.split(rows)
         qs = {q: list(s["criteria"]) for q, s in customer["questions"].items()}
         for i, r in enumerate(hold[:limit]):
             items.append({"id": f"c:{d.name}:{i}", "source": "customer", "domain": d.name, "text": r["state"],

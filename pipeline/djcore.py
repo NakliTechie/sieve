@@ -22,7 +22,7 @@ from pathlib import Path
 DATA = Path(os.environ.get("SIEVE_DATA", Path(__file__).resolve().parent.parent / "data"))  # gitignored
 HOME = Path(os.environ.get("DJP_HOME", DATA / "customers"))
 EXAMPLES = Path(__file__).with_name("examples")
-HOLDOUT_TENTHS = 3  # rows whose state hashes into 0..2 of 10 are held out: stable across runs and machines
+HOLDOUT_TENTHS = 3  # buckets 0-1 of 10: selection holdout (the gate chooses on it); bucket 2: test (reported only)
 
 
 def customer_dir(cid):
@@ -51,9 +51,18 @@ def _bucket(row):
 
 
 def split(rows):
-    """-> (few_shot pool + calibration rows, holdout rows); ordered by hash so the split never drifts."""
+    """-> (train, select, test), bucketed by a hash of the text so the split never drifts.
+    select (~20 %) is what the gate chooses on; test (~10 %) is never used to choose anything and is only reported.
+    Rows labelled by a model rather than a person (source "teacher", from `djp.py review`) only ever train."""
     rows = sorted(rows, key=lambda r: hashlib.sha1(r["state"].encode()).hexdigest())
-    return [r for r in rows if _bucket(r) >= HOLDOUT_TENTHS], [r for r in rows if _bucket(r) < HOLDOUT_TENTHS]
+    human = [r for r in rows if r.get("source") != "teacher"]
+    train = [r for r in rows if r.get("source") == "teacher" or _bucket(r) >= HOLDOUT_TENTHS]
+    return train, [r for r in human if _bucket(r) < 2], [r for r in human if _bucket(r) == 2]
+
+
+def heldout(state):
+    """True if a row with this text lands in select or test: the rows a person must check."""
+    return _bucket({"state": state}) < HOLDOUT_TENTHS
 
 
 def render_state(profile, state):

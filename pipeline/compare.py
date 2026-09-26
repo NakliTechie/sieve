@@ -70,7 +70,7 @@ def cmd_reread(cids):
     n, out = B.DJEV_READS, {}
     for cid in cids:
         cu, rows = P.load_customer(cid)
-        _, hold = P.split(rows)
+        _, hold, _ = P.split(rows)
         qs, st = cu["questions"], [r["state"] for r in hold]
         cache = B.cache_for(cid, "djev")
         runs = {"cached": B.djev_read(URL, qs, None, st, cache, 8, 1), "reread": B.djev_read(URL, qs, None, st, None, 8, 1),
@@ -107,7 +107,7 @@ def main(argv):
     for cid in cids:
         r = P.current_release(cid)
         _, rows = P.load_customer(cid)
-        _, hold = P.split(rows)
+        _, hold, _ = P.split(rows)
         chosen, barp = rows_for(r, hold)
         for q, p in r["plan"].items():
             truth = [x["answers"][q] for x in hold]

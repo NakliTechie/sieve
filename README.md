@@ -3,12 +3,11 @@
 **Per-customer text classifiers: start zero-shot on day one, train on the customer's own labels, and switch each
 question to the trained model only when it wins on held-out rows.**
 
-Python 3.12. Runs on a laptop CPU or Apple GPU. Customer data stays in a local, gitignored folder. No account, no
-telemetry.
+Python 3.12, on a laptop CPU or Apple GPU. Customer data stays on your disk. No account, no telemetry.
 
 [![license](https://img.shields.io/badge/license-MIT-2a78d6?style=flat-square)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.12-2a78d6?style=flat-square)](#install)
-[![tests](https://img.shields.io/badge/tests-21%20passing-2a78d6?style=flat-square)](#verify-it-yourself)
+[![tests](https://img.shields.io/badge/tests-29%20passing-2a78d6?style=flat-square)](#verify-it-yourself)
 [![serving](https://img.shields.io/badge/serving-CPU%2C%20no%20GPU-2a78d6?style=flat-square)](#commands)
 
 ![Accuracy against labelled examples per intent on 4 datasets: a TF-IDF keyword model passes the best zero-shot model at 20–50 labels per intent, mmBERT-small and Ettin-17M later](marketing/curves.png)
@@ -40,11 +39,12 @@ labels does better, once you have enough of them. The hard part is knowing when 
 sieve runs every candidate on rows you labelled and it never trained on:
 - zero-shot: [DiffusionGemma-Jev](https://github.com/taeold/djev-run) (with option-order averaging) and
   [GLiNER2.5-Decide](https://huggingface.co/fastino/GLiNER2.5-Decide);
-- trained: [Ettin-17M](https://huggingface.co/jhu-clsp/ettin-encoder-17m) and
-  [mmBERT-small](https://huggingface.co/jhu-clsp/mmBERT-small).
+- trained: TF-IDF + logistic regression (seconds, CPU), [Ettin-17M](https://huggingface.co/jhu-clsp/ettin-encoder-17m)
+  and [mmBERT-small](https://huggingface.co/jhu-clsp/mmBERT-small).
 
-A trained model replaces the zero-shot one for a question only if it beats it on your held-out rows, on both
-accuracy and log-loss. The winner is served exactly as it was scored.
+A trained model replaces the zero-shot one for a question only if it beats it on your held-out rows on accuracy and
+log-loss, and drops no option the zero-shot model still predicts. A second, untouched test split is never used to
+choose; it reports what the winner scores on rows nothing saw. The winner is served exactly as it was scored.
 
 **Use something else if** you already have thousands of labels and one fixed task: a plain fine-tune in
 [transformers](https://huggingface.co/docs/transformers/tasks/sequence_classification) or
@@ -67,22 +67,28 @@ every table are in [results/](results/).
 - **Languages:** one mmBERT trained on English and Hindi beat separate per-language models. Code-mixing (Hinglish)
   cost every model 4–6 points.
 
-## Adding labels
+## Labelling: let the model draft, a person checks
 
 ```bash
-.venv/bin/python pipeline/djp.py label shop new-rows.jsonl   # {"state": "...", "answers": {"category": "refund"}}
+.venv/bin/python pipeline/djp.py review shop inbox.csv     # model answers + the rows a person must check -> CSV
+python3 pipeline/djp.py label shop <that CSV> --reviewed    # after the person corrects the review=yes rows
 ```
 
-This appends the rows, retrains, re-runs the gate, and moves the live release only on a pass. Running it again with
-the same file changes nothing. `rollback` returns to the previous passing release.
+`review` labels new messages with the live release (or a zero-shot model) and flags two kinds of rows. The random
+~30 % that will be held out must be checked: they become the ground truth, and they are the sample where new intents
+show up. The least-confident half of the rest is checked too. The unchecked rows keep the model's answer and only
+ever train. `label` then retrains, re-runs the gate and moves the live release only on a pass; running it again
+changes nothing, and `rollback` returns to the previous passing release. A new intent needs its option added to
+`customer.json` and, from the experiments, 20–50 checked examples.
 
 ## Commands
 
 ```bash
 python3 pipeline/djp.py status [--json]                     # every customer: live release, accuracy vs bar, model per question
 python3 pipeline/djp.py init | import | check <c> …          # onboard a customer's CSV/JSONL
-.venv/bin/python pipeline/djp.py eval | release <c> [--arms djev,gliner,tiny,mmbert]   # score every candidate | gate and release
-.venv/bin/python pipeline/djp.py label <c> <file>           # append labels -> retrain -> gate -> release
+.venv/bin/python pipeline/djp.py review <c> <unlabelled.csv> # model answers + the rows a person must check -> CSV
+.venv/bin/python pipeline/djp.py eval | release <c> [--arms djev,gliner,tfidf,tiny,mmbert]   # score | gate and release
+.venv/bin/python pipeline/djp.py label <c> <file> [--reviewed]   # append labels -> retrain -> gate -> release
 python3 pipeline/djp.py rollback <c> [version]              # CURRENT -> an earlier passing release
 .venv/bin/python pipeline/serve.py                          # POST /c/<c>/v1/systemone, GET /c/<c>
 .venv/bin/python pipeline/bench.py fetch all                # the 8 public benchmark sets
@@ -93,8 +99,8 @@ python3 pipeline/djp.py rollback <c> [version]              # CURRENT -> an earl
 
 Agents: every command is declared in [tools.json](tools.json) with its input schema, cost and
 `delegable: agent | person-only`; adding labels is person-only. [SPEC.md §0](SPEC.md) is the agent contract. The
-DiffusionGemma-Jev arm needs a `/v1/systemone` server at `DJEV_URL`; `--arms gliner,tiny,mmbert` keeps everything
-local.
+DiffusionGemma-Jev arm needs a `/v1/systemone` server at `DJEV_URL`; `--arms gliner,tfidf,tiny,mmbert` keeps
+everything local.
 
 ## Verify it yourself
 
@@ -105,6 +111,8 @@ python3 -m unittest discover tests        # gate, idempotent labels, crash mid-r
 
 The gate refuses a release when no question beats the bar, and the live release stays (exit 7). A release killed
 midway leaves the previous one live. Training runs one model at a time per machine, under a GPU memory cap.
+`djp.py status` prints each release's test-split accuracy next to the selection score. On the 250-row stand-in
+customers the two differ by up to 18 points, so choose on a couple of hundred held-out rows or more.
 
 ## License
 

@@ -128,7 +128,7 @@ def cmd_banking77(opt):
 
 def cmd_customer(cid, opt):
     customer, rows = P.load_customer(cid)
-    train, hold = P.split(rows)
+    train, hold, _ = P.split(rows)
     model = opt.get("--model", MODEL)
     total_s, hits, n = 0.0, 0, 0
     for q, spec in customer["questions"].items():

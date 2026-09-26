@@ -16,11 +16,13 @@ exactly as it was scored.
 
 ```
 L0 labels      data/customers/<c>/customer.json + data.jsonl      the person's ground truth (person-only writes)
-L1 split       djcore.split: sha1(text) % 10 < 3 -> holdout        fixed by the text; nobody chooses it
+L1 split       djcore.split: sha1(text) % 10: 0-1 select, 2 test, 3-9 train; model-labelled rows train only
 L2 reads       backends.py: djev | gliner | tiny -> {option: p}    djev + gliner cached per customer (cache/*.jsonl)
+L0' review     djp.review: model answers + held-out rows and least-confident half flagged for a person
 L3 candidates  djp.evaluate: base(+cal), profile(+cal), each also @3 (3 reads over shuffled option orders),
-               gliner(+cal), tiny (>= 20 rows/option)
-L4 gate        djp.choose: acc >= bar and log-loss < bar; highest accuracy wins (log-loss breaks ties); else the bar
+               gliner(+cal), tfidf, tiny, mmbert (trained arms need >= 20 rows/option)
+L4 gate        djp.choose on select: acc >= bar, log-loss < bar, no more never-predicted options; highest accuracy
+               wins (log-loss breaks ties); else the bar. test is reported, never used to choose
 L5 release     releases/<v>/release.json + tiny weights; CURRENT; releases/log.jsonl
 L6 serve       serve.py -> backends.answer(release): the L5 choice, same reads, same weights
 ```
@@ -93,7 +95,9 @@ and tiny are local and free. `--arms gliner,tiny` keeps a release entirely local
 
 `customer, version, kind="backends", arms, bar, data_sha, djev_reads, base{image, model}, gliner_model, tiny_model, questions,
 profile, plan{q: {variant, backend, use_profile, reads, calibration, path?}}, tiny{q: {eligible, least_per_option,
-train_s?}}, split, eval{candidate: {q: {accuracy, log_loss, ece}}}, released_eval, gate{passed, rule}, seconds`.
+train_s?}}, split{train, holdout, test}, eval{candidate: {q: {accuracy, log_loss, ece, unused}}}, released_eval,
+test_eval{n, bar, released}, gate{passed, rule}, seconds`. data.jsonl rows may carry `source: "teacher"` (training
+only).
 
 ## §2 Open
 

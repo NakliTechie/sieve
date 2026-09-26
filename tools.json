@@ -1,6 +1,6 @@
 {
   "name": "sieve",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Per-customer decision classifiers: each question is served by djev, GLiNER or a tiny fine-tuned model, whichever passes the per-question holdout gate. Every CLI command and HTTP route is declared here (SPEC.md §0). A tool's `run` is its only handler: the CLI and HTTP routes are the doors, and there is no second code path.",
   "conventions": {
     "python": "Use .venv/bin/python for any tool that loads a model (eval, release, label, serve, ab.run, tiny.*). python3 is enough for status, init, import, check, rollback and ab.report.",
@@ -124,6 +124,54 @@
       ]
     },
     {
+      "name": "djp.review",
+      "description": "Label unlabelled rows with the live release (or a zero-shot model) and write a CSV for a person: every row that lands in the held-out sets (ground truth; the random sample where new intents show up) plus the least-confident share of the rest are flagged review=yes. Reads only.",
+      "delegable": "agent",
+      "mutates": false,
+      "cost": "free with the release or gliner teacher; gpu with a djev teacher",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "customer",
+          "file"
+        ],
+        "properties": {
+          "customer": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string",
+            "description": "unlabelled .csv or .jsonl"
+          },
+          "state": {
+            "type": "string",
+            "default": "state"
+          },
+          "share": {
+            "type": "number",
+            "default": 0.5
+          },
+          "teacher": {
+            "enum": [
+              "release",
+              "gliner",
+              "djev",
+              "djev@3"
+            ]
+          },
+          "out": {
+            "type": "string"
+          }
+        }
+      },
+      "run": ".venv/bin/python pipeline/djp.py review {customer} {file} [--state col] [--share 0.5] [--teacher T] [--out file.csv]",
+      "verdicts": [
+        "REVIEW_READY",
+        "DATA_INVALID",
+        "SETUP"
+      ]
+    },
+    {
       "name": "djp.eval",
       "description": "Every candidate of every arm on the holdout, per question (accuracy/log-loss), and what the gate would pick. Writes no release; fills the read caches. djev candidates come at 1 read and at DJEV_READS reads (@N, averaged over shuffled option orders); the bar is plain djev @N.",
       "delegable": "agent",
@@ -144,13 +192,17 @@
               "enum": [
                 "djev",
                 "gliner",
-                "tiny"
+                "tfidf",
+                "tiny",
+                "mmbert"
               ]
             },
             "default": [
               "djev",
               "gliner",
-              "tiny"
+              "tfidf",
+              "tiny",
+              "mmbert"
             ]
           }
         }
@@ -163,7 +215,7 @@
     },
     {
       "name": "djp.release",
-      "description": "Candidates -> per-question gate (accuracy >= bar and log-loss < bar) -> release record + tiny weights -> CURRENT. UNCHANGED when the live release was built from the same data and arms. djev candidates come at 1 read and at DJEV_READS reads (@N, averaged over shuffled option orders); the bar is plain djev @N.",
+      "description": "Candidates (djev, GLiNER, TF-IDF, Ettin, mmBERT) -> per-question gate on the selection holdout (accuracy >= bar, log-loss < bar, no more never-predicted options) -> test split reported -> release record + tiny weights -> CURRENT. UNCHANGED when the live release was built from the same data and arms. djev candidates come at 1 read and at DJEV_READS reads (@N, averaged over shuffled option orders); the bar is plain djev @N.",
       "delegable": "agent",
       "mutates": true,
       "cost": "gpu if arms include djev and rows are not cached; else free",
@@ -182,13 +234,17 @@
               "enum": [
                 "djev",
                 "gliner",
-                "tiny"
+                "tfidf",
+                "tiny",
+                "mmbert"
               ]
             },
             "default": [
               "djev",
               "gliner",
-              "tiny"
+              "tfidf",
+              "tiny",
+              "mmbert"
             ]
           },
           "force": {
@@ -208,7 +264,7 @@
     },
     {
       "name": "djp.label",
-      "description": "Append new labelled rows (dedup by text; conflicting labels refused), then retrain tiny, gate, and move CURRENT only on pass. Re-running with the same file changes nothing.",
+      "description": "Append new labelled rows (dedup by text; conflicting labels refused), then retrain tiny, gate, and move CURRENT only on pass. Re-running with the same file changes nothing. With --reviewed (a file from djp.review): rows marked review=yes are human labels; the rest are the model's answers, marked source 'teacher' (training only, never scored).",
       "delegable": "person-only",
       "mutates": true,
       "cost": "gpu for new holdout rows if the live release uses djev; else free",
@@ -251,10 +307,14 @@
           "force": {
             "type": "boolean",
             "default": false
+          },
+          "reviewed": {
+            "type": "boolean",
+            "default": false
           }
         }
       },
-      "run": ".venv/bin/python pipeline/djp.py label {customer} {file} [--state {state}] [--label {label,}] [--arms {arms,}] [--force]",
+      "run": ".venv/bin/python pipeline/djp.py label {customer} {file} [--state {state}] [--label {label,}] [--arms {arms,}] [--reviewed] [--force]",
       "verdicts": [
         "LABELLED then RELEASED | UNCHANGED | GATE_REFUSED",
         "DATA_INVALID",
@@ -526,6 +586,190 @@
       "verdicts": [
         "TRAINED"
       ]
+    },
+    {
+      "name": "bench.fetch",
+      "description": "Fetch the public benchmark sets (MASSIVE en/hi, CLINC150, civil_comments, banking77, Hinglish-TOP (+English), Hinglish YouTube, Hinglish retail) into data/bench/<name> with a fixed 1,000-row test set.",
+      "delegable": "agent",
+      "mutates": true,
+      "cost": "free (network)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "run": ".venv/bin/python pipeline/bench.py fetch <name>|all",
+      "verdicts": []
+    },
+    {
+      "name": "curve.run",
+      "description": "Stock vs trained at every label count (5/10/20/50/all per option) on a bench set; resumable; --seed for repeats.",
+      "delegable": "agent",
+      "mutates": true,
+      "cost": "gpu for djev arms; else free",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "bench": {
+            "type": "string"
+          },
+          "arms": {
+            "type": "string"
+          },
+          "seed": {
+            "type": "integer"
+          }
+        }
+      },
+      "run": ".venv/bin/python pipeline/curve.py run <bench> [--arms ...] [--stages ...] [--seed N]",
+      "verdicts": []
+    },
+    {
+      "name": "curve.report",
+      "description": "Markdown table of a bench set's curve (mean ± sd over seeds; never-predicted counts).",
+      "delegable": "agent",
+      "mutates": false,
+      "cost": "free",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "bench": {
+            "type": "string"
+          }
+        }
+      },
+      "run": "python3 pipeline/curve.py report <bench>",
+      "verdicts": []
+    },
+    {
+      "name": "distill.label",
+      "description": "djev@3 labels a bench set's training pool (cached).",
+      "delegable": "agent",
+      "mutates": true,
+      "cost": "gpu",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "bench": {
+            "type": "string"
+          },
+          "per_opt": {
+            "type": "string"
+          }
+        }
+      },
+      "run": ".venv/bin/python pipeline/distill.py label <bench> --per-opt N",
+      "verdicts": []
+    },
+    {
+      "name": "distill.run",
+      "description": "Train students on teacher labels, filtered sets, simulated corrections and label noise; score on gold test rows.",
+      "delegable": "agent",
+      "mutates": true,
+      "cost": "free (reads cached)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "bench": {
+            "type": "string"
+          },
+          "per_opt": {
+            "type": "string"
+          }
+        }
+      },
+      "run": ".venv/bin/python pipeline/distill.py run <bench> --per-opt N",
+      "verdicts": []
+    },
+    {
+      "name": "distill.review",
+      "description": "Review-budget sweep: correct 0/10/25/50 % least-confident (+ random 25 %) of a teacher's labels, train mmBERT.",
+      "delegable": "agent",
+      "mutates": true,
+      "cost": "free (reads cached)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "bench": {
+            "type": "string"
+          },
+          "per_opt": {
+            "type": "string"
+          },
+          "teacher": {
+            "type": "string"
+          }
+        }
+      },
+      "run": ".venv/bin/python pipeline/distill.py review <bench> --per-opt N --teacher T",
+      "verdicts": []
+    },
+    {
+      "name": "distill.report",
+      "description": "Markdown table of a bench set's distillation cells.",
+      "delegable": "agent",
+      "mutates": false,
+      "cost": "free",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "bench": {
+            "type": "string"
+          }
+        }
+      },
+      "run": "python3 pipeline/distill.py report <bench>",
+      "verdicts": []
+    },
+    {
+      "name": "chain.run",
+      "description": "English -> Ettin, rest -> mmBERT chain vs single models on MASSIVE en+hi; latency on CPU and MPS.",
+      "delegable": "agent",
+      "mutates": true,
+      "cost": "free",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "stage": {
+            "type": "string"
+          }
+        }
+      },
+      "run": ".venv/bin/python pipeline/chain.py [--stage 50|all]",
+      "verdicts": []
+    },
+    {
+      "name": "charts.draw",
+      "description": "Redraw marketing/{curves,review,order,social}.png from the recorded results.",
+      "delegable": "agent",
+      "mutates": true,
+      "cost": "free",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "run": ".venv/bin/python pipeline/charts.py",
+      "verdicts": []
+    },
+    {
+      "name": "gliner.card",
+      "description": "Reproduce the GLiNER2.5-Decide card's fast-decisions headline the card's way (multi-label included).",
+      "delegable": "agent",
+      "mutates": true,
+      "cost": "free",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "threshold": {
+            "type": "number"
+          }
+        }
+      },
+      "run": ".venv/bin/python pipeline/gliner_card.py [--threshold 0.4]",
+      "verdicts": []
     }
   ]
 }

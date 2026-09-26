@@ -4,6 +4,8 @@
   gliner  GLiNER2.5-Decide on this machine; zero-shot. Deterministic.
   tiny    Ettin-17M fine-tuned per question on the customer's training rows; saved inside the release and served
           from there on CPU or MPS (no GPU service).
+  tfidf   TF-IDF (word 1-2 + character 2-5 grams) + logistic regression, trained in seconds on CPU; the keyword
+          baseline that beat mmBERT below 50 labels per intent on every intent set (results/seeds-tfidf-2026-09-26.md).
   mmbert  mmBERT-small (140M, multilingual) fine-tuned and served the same way; +7-12 pts over tiny on Hindi
           (results/stock-vs-trained-2026-09-26.md). 128 tokens: at 256 it grew past 11 GB on MPS.
 
@@ -35,7 +37,8 @@ GLINER_MODEL = os.environ.get("GLINER_MODEL", "fastino/GLiNER2.5-Decide")
 TINY_MIN_PER_OPTION = 20  # labelled rows per option (all rows, not only training) before tiny is a candidate
 TINY_EPOCHS = 10  # both trained arms
 DJEV_READS = int(os.environ.get("DJEV_READS", "3"))  # reads averaged over option orders for the bar and the @N candidates
-ARMS = ("djev", "gliner", "tiny", "mmbert")
+ARMS = ("djev", "gliner", "tfidf", "tiny", "mmbert")
+LOCAL_TRAINED = ("tfidf", "tiny", "mmbert")  # arms trained on the customer's rows; each needs >= TINY_MIN_PER_OPTION
 # trained arms: model, learning rate, max tokens
 TRAINED = {"tiny": ("jhu-clsp/ettin-encoder-17m", 1e-4, 256), "mmbert": ("jhu-clsp/mmBERT-small", 5e-5, 128)}
 
@@ -223,6 +226,45 @@ def tiny_fit(q, spec, train, arm="tiny"):
                    TINY_EPOCHS, lr, max_len)
 
 
+def tfidf_fit(q, spec, train):
+    """-> (fitted sklearn pipeline, seconds). CPU only; no GPU lock needed."""
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import make_pipeline, make_union
+    except ImportError as e:
+        raise NeedsVenv(f"tfidf arm needs scikit-learn ({e})") from e
+    clf = make_pipeline(make_union(TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True),
+                                   TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 5), sublinear_tf=True)),
+                        LogisticRegression(max_iter=2000, C=10))
+    t0 = time.time()
+    clf.fit([r["state"] for r in train], [r["answers"][q] for r in train])
+    return clf, time.time() - t0
+
+
+def tfidf_proba(clf, states, options):
+    """-> [{option: p}] over every option (options never seen in training get 0)."""
+    classes = list(clf.classes_)
+    return [{o: 0.0 for o in options} | dict(zip(classes, map(float, p))) for p in clf.predict_proba(states)]
+
+
+def tfidf_save(clf, path):
+    import joblib
+    os.makedirs(path, exist_ok=True)
+    joblib.dump(clf, os.path.join(path, "model.joblib"))
+
+
+_tfidf_loaded = {}
+
+
+def _tfidf_model(path):
+    """Load a release's TF-IDF model (our own file, written by tfidf_save into the release dir)."""
+    if path not in _tfidf_loaded:
+        import joblib
+        _tfidf_loaded[path] = joblib.load(os.path.join(path, "model.joblib"))
+    return _tfidf_loaded[path]
+
+
 def park(model):
     """Move a trained model to CPU and return the accelerator's cache (a release trains up to 2 x questions models;
     held on MPS they reached 13 GB on helpdesk)."""
@@ -279,6 +321,10 @@ def answer(url, release, state):
             if backend == "gliner":
                 raw.update(gliner_read(group, [state])[0])
                 calls += 1
+            elif backend == "tfidf":
+                for q in group:
+                    raw[q] = tfidf_proba(_tfidf_model(str(rdir / plan[q]["path"])), [state], qs[q]["criteria"])[0]
+                    calls += 1
             elif backend in TRAINED:
                 for q in group:
                     m, tok = _tiny_model(str(rdir / plan[q]["path"]))
@@ -298,6 +344,7 @@ def answer(url, release, state):
         best = max(p, key=p.get)
         out[q] = {"choice": best, "probabilities": {k: round(v, 6) for k, v in p.items()},
                   "confidence": round(p[best], 6), "backend": plan[q]["backend"]}
-    models = {"djev": model or DJEV_MODEL, "gliner": GLINER_MODEL, **{a: m for a, (m, _, _) in TRAINED.items()}}
+    models = {"djev": model or DJEV_MODEL, "gliner": GLINER_MODEL, "tfidf": "tfidf+logreg (sklearn)",
+              **{a: m for a, (m, _, _) in TRAINED.items()}}
     return {"model": {b: models[b] for b in sorted({s["backend"] for s in plan.values()})}, "customer": release["customer"], "release": release["version"], "answers": out,
             "diagnostics": {"timing": {"total_ms": round((time.time() - t0) * 1000, 1)}, "calls": calls}}
