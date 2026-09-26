@@ -17,7 +17,7 @@ Arms (backends.py): djev (zero-shot on the GPU service; + calibration, + the cus
 gliner (GLiNER2.5-Decide, zero-shot, local; + calibration), tiny (Ettin-17M fine-tuned on the training rows, local;
 only for questions with >= 20 labelled rows per option), mmbert (mmBERT-small, multilingual, the same way). The bar is plain djev (or plain gliner when djev is not in
 --arms). Per question, a candidate replaces the bar only if its holdout accuracy >= the bar's and its log-loss is
-lower; among those the lowest log-loss wins. The winning candidate is what gets served (serve.py): tiny weights are
+lower; among those the highest accuracy wins (log-loss breaks ties). The winning candidate is what gets served (serve.py): tiny weights are
 saved in the release. `release` is skipped (UNCHANGED) when the live release was built from the same data and arms.
 
 Customer data lives in $DJP_HOME (default data/customers, gitignored). Layer 2 (TRAINING.md) would add trained djev
@@ -255,15 +255,22 @@ def candidate(name):
     return head, False, 1
 
 
+GATE_RULE = ("per question: pass = holdout accuracy >= {bar} and log-loss < {bar}; among passing candidates the highest "
+             "accuracy wins, lowest log-loss breaks ties; if none passes the question stays on {bar}; refuse if every "
+             "question stays on {bar}")
+
+
 def choose(questions, ev, bar):
     """The gate, per question: among candidates with holdout accuracy >= the bar's and log-loss < the bar's, the one
-    with the lowest log-loss; if none passes, the question stays on the bar."""
+    with the highest accuracy (lowest log-loss breaks ties; then the name, for determinism); if none passes, the
+    question stays on the bar. Accuracy decides because a served answer is right or wrong; log-loss still has to
+    beat the bar to pass (set 2026-09-26 after lowest-log-loss picked 77.6 % over 81.6 % on moderation·toxic)."""
     plan = {}
     for q in questions:
         b = ev[bar][q]
         ok = [n for n in ev if n != bar and q in ev[n]
               and ev[n][q]["accuracy"] >= b["accuracy"] and ev[n][q]["log_loss"] < b["log_loss"]]
-        plan[q] = min(ok, key=lambda n: (ev[n][q]["log_loss"], n)) if ok else bar
+        plan[q] = min(ok, key=lambda n: (-ev[n][q]["accuracy"], ev[n][q]["log_loss"], n)) if ok else bar
     return plan
 
 
@@ -358,8 +365,9 @@ def cmd_release(cid, arms, force=False):
     sha = P.data_sha(cid)
     cur = P.current_release(cid)
     if (cur and not force and cur.get("data_sha") == sha and cur.get("arms") == list(arms)
-            and ("djev" not in arms or cur.get("djev_reads", 1) == B.DJEV_READS)):
-        print(f"verdict=UNCHANGED customer={cid} live={cur['version']} built from the same data and arms "
+            and ("djev" not in arms or cur.get("djev_reads", 1) == B.DJEV_READS)
+            and cur.get("gate", {}).get("rule") == GATE_RULE.format(bar=cur.get("bar", "base"))):
+        print(f"verdict=UNCHANGED customer={cid} live={cur['version']} built from the same data, arms and gate rule "
               f"(data_sha={sha}); add --force to rebuild")
         return
     e = evaluate(cid, arms)
@@ -387,8 +395,7 @@ def cmd_release(cid, arms, force=False):
                          "calibration_rows": len(e["fit_rows"]), "holdout": len(hold)},
                "eval": ev, "released_eval": {**per_q, "_mean": mean},
                "gate": {"passed": passed,
-                        "rule": f"per question: holdout accuracy >= {bar} and log-loss < {bar}, lowest log-loss wins; "
-                                f"else that question stays on {bar}; refuse if every question stays on {bar}"},
+                        "rule": GATE_RULE.format(bar=bar)},
                "seconds": round(time.time() - t0, 1)}
     # build in a scratch dir, rename into place, then move CURRENT: a crash leaves the old release live
     for old in rel.glob(".tmp-*"):

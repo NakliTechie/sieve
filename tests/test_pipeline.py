@@ -80,14 +80,17 @@ class Pipeline(unittest.TestCase):
         cur = self.d / "releases" / "CURRENT"
         return cur.read_text().strip() if cur.exists() else None
 
-    def test_gate_picks_lowest_logloss_among_passing(self):
+    def test_gate_picks_highest_accuracy_among_passing(self):
         ev = {"base": {"a": {"accuracy": 0.6, "log_loss": 1.0}, "b": {"accuracy": 0.8, "log_loss": 0.5}},
               "tiny": {"a": {"accuracy": 0.9, "log_loss": 0.4}},
               "gliner": {"a": {"accuracy": 0.6, "log_loss": 0.3}, "b": {"accuracy": 0.7, "log_loss": 0.1}},
               "base+cal": {"a": {"accuracy": 0.5, "log_loss": 0.2}, "b": {"accuracy": 0.8, "log_loss": 0.6}}}
-        # a: base+cal loses accuracy; gliner ties the bar on accuracy with lower log-loss than tiny -> gliner
+        # a: base+cal loses accuracy; gliner and tiny both pass -> tiny, the higher accuracy (not gliner's lower log-loss)
         # b: gliner loses accuracy, base+cal has higher log-loss, tiny does not cover b -> stays on the bar
-        self.assertEqual(djp.choose(["a", "b"], ev, "base"), {"a": "gliner", "b": "base"})
+        self.assertEqual(djp.choose(["a", "b"], ev, "base"), {"a": "tiny", "b": "base"})
+        # equal accuracy: the lower log-loss breaks the tie
+        ev["mmbert"] = {"a": {"accuracy": 0.9, "log_loss": 0.35}}
+        self.assertEqual(djp.choose(["a"], ev, "base")["a"], "mmbert")
 
     def test_release_label_idempotent(self):
         self.assertEqual(self.release("release", "acme", "--arms", "gliner,tiny"), 0)

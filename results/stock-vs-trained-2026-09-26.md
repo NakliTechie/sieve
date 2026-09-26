@@ -132,3 +132,25 @@ at 2.8 GB. `compare.py` rebuilt every prediction from the saved weights and cach
 - moderation · toxic shows the open selection issue. mmBERT has the lowest log-loss (0.418 vs 0.437) but lower
   accuracy than GLiNER + calibration (77.6 % vs 81.6 %). The gap is 3 rows of 76, within noise. But lowest-log-loss
   selection has now picked a less accurate model once.
+
+## Gate rule: highest accuracy among passing candidates (07:46 IST)
+
+Chirag chose accuracy-first selection. A candidate still has to beat the bar on both accuracy and log-loss to pass.
+Among passing candidates, the highest holdout accuracy now wins, and lowest log-loss breaks ties. All 3 customers were
+re-released; the djev reads came from the cache. `compare.py` rebuilt every prediction and matched the gated numbers.
+
+| Customer · question | n | Options | Chosen | Chosen acc | Bar acc | Bar re-read | Δ pts | Chosen right / bar right (discordant rows) | Sign test p 
+|---|---|---|---|---|---|---|---|---|---
+| helpdesk · queue | 78 | 6 | djev (base@3+cal) | 39.7 | 35.9 | 35.9 | +3.8 | 7 / 4 | 0.549 
+| helpdesk · priority | 78 | 3 | djev (base@3+cal) | 51.3 | 34.6 | 39.7 | +16.7 | 15 / 2 | 0.00235 
+| helpdesk · type | 78 | 4 | djev (profile+cal) | 75.6 | 60.3 | 60.3 | +15.4 | 14 / 2 | 0.00418 
+| moderation · toxic | 76 | 2 | gliner (gliner+cal) | 81.6 | 73.7 | 73.7 | +7.9 | 13 / 7 | 0.263 
+| moderation · insult | 76 | 2 | djev (profile@3+cal) | 86.8 | 84.2 | 85.5 | +2.6 | 2 / 0 | 0.5 
+| shop · category | 72 | 11 | mmbert (mmbert) | 97.2 | 70.8 | 70.8 | +26.4 | 20 / 1 | 2.1e-05 
+
+- 3 picks changed. moderation · toxic went back to GLiNER + calibration (81.6 %, from mmBERT 77.6 %). helpdesk ·
+  priority went to djev @3 + calibration (51.3 %, from GLiNER + calibration 46.2 %). helpdesk · type went to djev
+  with rules + calibration at 1 read (75.6 %, from the 3-read version 74.4 %). Serving that question now costs 1 djev
+  call instead of 3.
+- 3 of 6 questions now beat the bar outside noise (p < 0.05): shop · category, helpdesk · priority and helpdesk · type.
+  Neither moderation question does. On 72–78 held-out rows, 1 row moves accuracy 1.3 pts.

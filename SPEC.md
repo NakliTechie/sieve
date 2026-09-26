@@ -20,7 +20,7 @@ L1 split       djcore.split: sha1(text) % 10 < 3 -> holdout        fixed by the 
 L2 reads       backends.py: djev | gliner | tiny -> {option: p}    djev + gliner cached per customer (cache/*.jsonl)
 L3 candidates  djp.evaluate: base(+cal), profile(+cal), each also @3 (3 reads over shuffled option orders),
                gliner(+cal), tiny (>= 20 rows/option)
-L4 gate        djp.choose: acc >= bar and log-loss < bar, lowest log-loss wins, else the bar
+L4 gate        djp.choose: acc >= bar and log-loss < bar; highest accuracy wins (log-loss breaks ties); else the bar
 L5 release     releases/<v>/release.json + tiny weights; CURRENT; releases/log.jsonl
 L6 serve       serve.py -> backends.answer(release): the L5 choice, same reads, same weights
 ```
@@ -98,6 +98,4 @@ train_s?}}, split, eval{candidate: {q: {accuracy, log_loss, ece}}}, released_eva
 ## §2 Open
 
 - djev bar noise: the bar is now averaged over 3 reads (Batch B). Its measured effect is in results/ (Batch B).
-- Selection among passing candidates is lowest log-loss. On larger holdouts, check whether this ever picks a
-  lower-accuracy candidate that customers would notice.
 - Layer 2 (trained djev weights, TRAINING.md) enters as one more candidate behind the same gate.
